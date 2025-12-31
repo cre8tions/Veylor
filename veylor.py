@@ -224,6 +224,13 @@ class SourceRelay:
         logger.info(f"Shutting down source relay for {self.source_config['url']}...")
         self.running = False
 
+        # Close source connection to break out of receive loop
+        if self.source_connection:
+            try:
+                await self.source_connection.close()
+            except:
+                pass
+
         # Close all WebSocket clients
         ws_close_tasks = []
         for client in self.ws_clients.copy():
@@ -261,6 +268,7 @@ class WebSocketRelay:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.source_relays = []
+        self.source_tasks = []
         self.running = True
 
     async def run(self):
@@ -273,17 +281,16 @@ class WebSocketRelay:
                 return
 
             # Create a SourceRelay for each source
-            source_tasks = []
             performance_config = self.config.get('performance', {})
             
             for source_config in sources:
                 source_relay = SourceRelay(source_config, performance_config)
                 self.source_relays.append(source_relay)
                 task = asyncio.create_task(source_relay.run())
-                source_tasks.append(task)
+                self.source_tasks.append(task)
 
             # Wait for all source relays to complete
-            await asyncio.gather(*source_tasks)
+            await asyncio.gather(*self.source_tasks)
 
         except asyncio.CancelledError:
             logger.info("Relay service cancelled")
@@ -297,14 +304,24 @@ class WebSocketRelay:
         logger.info("Shutting down all source relays...")
         self.running = False
 
-        # Shutdown all source relays
-        shutdown_tasks = []
+        # First, set all source relays to stop running
         for source_relay in self.source_relays:
             source_relay.running = False
-            shutdown_tasks.append(asyncio.create_task(source_relay.shutdown()))
-        
-        if shutdown_tasks:
-            await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+            # Close source connections to break out of receive loops
+            if source_relay.source_connection:
+                try:
+                    await source_relay.source_connection.close()
+                except:
+                    pass
+
+        # Cancel all running tasks
+        for task in self.source_tasks:
+            if not task.done():
+                task.cancel()
+
+        # Wait for tasks to complete/cancel with their own cleanup
+        if self.source_tasks:
+            await asyncio.gather(*self.source_tasks, return_exceptions=True)
 
         logger.info("All source relays shut down")
 
