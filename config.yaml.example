@@ -1,0 +1,29 @@
+# Veylor WebSocket Relay Configuration Example
+
+# Remote WebSocket source(s) to connect to
+sources:
+  - url: "wss://example.com/websocket"
+    # Optional: headers for authentication
+    # headers:
+    #   Authorization: "Bearer token"
+
+# Rebroadcast endpoints
+rebroadcast:
+  # WebSocket server configuration
+  websocket:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8765
+  
+  # Unix socket configuration
+  unix_socket:
+    enabled: true
+    path: "/tmp/veylor.sock"
+
+# Performance tuning
+performance:
+  # Maximum message queue size per client
+  max_queue_size: 1000
+  # Reconnection settings for source
+  reconnect_delay: 5
+  reconnect_max_attempts: 0  # 0 for infinite
