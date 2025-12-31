@@ -13,8 +13,8 @@ import sys
 import os
 from typing import Set, Optional, Dict, Any
 import websockets
-from websockets.server import serve as ws_serve
-from websockets.client import connect as ws_connect
+from websockets.asyncio.server import serve as ws_serve
+from websockets.asyncio.client import connect as ws_connect
 import yaml
 import argparse
 
@@ -29,15 +29,15 @@ logger = logging.getLogger('veylor')
 
 class WebSocketRelay:
     """High-performance non-blocking WebSocket relay"""
-    
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.ws_clients: Set[websockets.WebSocketServerProtocol] = set()
+        self.ws_clients: Set[websockets.ServerConnection] = set()
         self.unix_clients: Set[asyncio.StreamWriter] = set()
         self.running = True
         self.source_connection = None
         self.servers = []
-        
+
     async def broadcast_message(self, message: bytes):
         """Broadcast message to all connected clients (non-blocking)"""
         # Broadcast to WebSocket clients
@@ -50,14 +50,14 @@ class WebSocketRelay:
                 except Exception as e:
                     logger.error(f"Error queuing WebSocket message: {e}")
                     self.ws_clients.discard(client)
-            
+
             # Wait for all sends to complete (non-blocking)
             if ws_tasks:
                 results = await asyncio.gather(*ws_tasks, return_exceptions=True)
                 for i, result in enumerate(results):
                     if isinstance(result, Exception):
                         logger.error(f"Error sending to WebSocket client: {result}")
-        
+
         # Broadcast to Unix socket clients
         if self.unix_clients:
             unix_tasks = []
@@ -76,17 +76,17 @@ class WebSocketRelay:
                         await writer.wait_closed()
                     except:
                         pass
-            
+
             # Wait for all drains to complete
             if unix_tasks:
                 await asyncio.gather(*unix_tasks, return_exceptions=True)
-    
+
     async def handle_websocket_client(self, websocket, path=None):
         """Handle incoming WebSocket client connection"""
         self.ws_clients.add(websocket)
         client_addr = websocket.remote_address
         logger.info(f"WebSocket client connected: {client_addr}")
-        
+
         try:
             # Keep connection alive - client will receive broadcasts
             await websocket.wait_closed()
@@ -95,14 +95,14 @@ class WebSocketRelay:
         finally:
             self.ws_clients.discard(websocket)
             logger.info(f"WebSocket client disconnected: {client_addr}")
-    
-    async def handle_unix_client(self, reader: asyncio.StreamReader, 
+
+    async def handle_unix_client(self, reader: asyncio.StreamReader,
                                  writer: asyncio.StreamWriter):
         """Handle incoming Unix socket client connection"""
         self.unix_clients.add(writer)
         peer = writer.get_extra_info('peername', 'unknown')
         logger.info(f"Unix socket client connected: {peer}")
-        
+
         try:
             # Keep connection alive - client will receive broadcasts
             while self.running:
@@ -121,45 +121,45 @@ class WebSocketRelay:
             except:
                 pass
             logger.info(f"Unix socket client disconnected: {peer}")
-    
+
     async def connect_to_source(self, source_config: Dict[str, Any]):
         """Connect to remote WebSocket source and relay messages"""
         url = source_config['url']
         headers = source_config.get('headers', {})
         reconnect_delay = self.config.get('performance', {}).get('reconnect_delay', 5)
         max_attempts = self.config.get('performance', {}).get('reconnect_max_attempts', 0)
-        
+
         attempt = 0
         while self.running:
             try:
                 if max_attempts > 0 and attempt >= max_attempts:
                     logger.error(f"Max reconnection attempts ({max_attempts}) reached for {url}")
                     break
-                
+
                 if attempt > 0:
                     logger.info(f"Reconnecting to {url} (attempt {attempt + 1})...")
                     await asyncio.sleep(reconnect_delay)
-                
+
                 attempt += 1
-                
+
                 logger.info(f"Connecting to source: {url}")
-                async with ws_connect(url, extra_headers=headers) as websocket:
+                async with ws_connect(url, additional_headers=headers) as websocket:
                     self.source_connection = websocket
                     logger.info(f"Connected to source: {url}")
                     attempt = 0  # Reset attempt counter on successful connection
-                    
+
                     # Receive and broadcast messages
                     async for message in websocket:
                         if not self.running:
                             break
-                        
+
                         # Handle both text and binary messages
                         if isinstance(message, str):
                             message = message.encode('utf-8')
-                        
+
                         # Broadcast to all clients (non-blocking)
                         await self.broadcast_message(message)
-                        
+
             except asyncio.CancelledError:
                 logger.info(f"Source connection cancelled: {url}")
                 break
@@ -167,41 +167,41 @@ class WebSocketRelay:
                 logger.error(f"Error with source {url}: {e}")
                 if not self.running:
                     break
-    
+
     async def start_websocket_server(self):
         """Start WebSocket rebroadcast server"""
         ws_config = self.config.get('rebroadcast', {}).get('websocket', {})
         if not ws_config.get('enabled', True):
             return
-        
+
         host = ws_config.get('host', '0.0.0.0')
         port = ws_config.get('port', 8765)
-        
+
         logger.info(f"Starting WebSocket server on {host}:{port}")
         server = await ws_serve(self.handle_websocket_client, host, port)
         self.servers.append(server)
         logger.info(f"WebSocket server started on {host}:{port}")
-    
+
     async def start_unix_server(self):
         """Start Unix socket rebroadcast server"""
         unix_config = self.config.get('rebroadcast', {}).get('unix_socket', {})
         if not unix_config.get('enabled', True):
             return
-        
+
         socket_path = unix_config.get('path', '/tmp/veylor.sock')
-        
+
         # Remove existing socket file if it exists
         if os.path.exists(socket_path):
             os.remove(socket_path)
-        
+
         logger.info(f"Starting Unix socket server on {socket_path}")
         server = await asyncio.start_unix_server(
-            self.handle_unix_client, 
+            self.handle_unix_client,
             path=socket_path
         )
         self.servers.append(server)
         logger.info(f"Unix socket server started on {socket_path}")
-    
+
     async def run(self):
         """Run the relay service"""
         try:
@@ -210,41 +210,41 @@ class WebSocketRelay:
                 self.start_websocket_server(),
                 self.start_unix_server()
             )
-            
+
             # Connect to all sources
             source_tasks = []
             sources = self.config.get('sources', [])
-            
+
             if not sources:
                 logger.error("No sources configured!")
                 return
-            
+
             for source in sources:
                 task = asyncio.create_task(self.connect_to_source(source))
                 source_tasks.append(task)
-            
+
             # Wait for all source tasks to complete
             await asyncio.gather(*source_tasks)
-            
+
         except asyncio.CancelledError:
             logger.info("Relay service cancelled")
         except Exception as e:
             logger.error(f"Error in relay service: {e}")
         finally:
             await self.shutdown()
-    
+
     async def shutdown(self):
         """Graceful shutdown"""
         logger.info("Shutting down...")
         self.running = False
-        
+
         # Close all WebSocket clients
         ws_close_tasks = []
         for client in self.ws_clients.copy():
             ws_close_tasks.append(asyncio.create_task(client.close()))
         if ws_close_tasks:
             await asyncio.gather(*ws_close_tasks, return_exceptions=True)
-        
+
         # Close all Unix socket clients
         for writer in self.unix_clients.copy():
             try:
@@ -252,12 +252,12 @@ class WebSocketRelay:
                 await writer.wait_closed()
             except:
                 pass
-        
+
         # Close servers
         for server in self.servers:
             server.close()
             await server.wait_closed()
-        
+
         logger.info("Shutdown complete")
 
 
@@ -275,17 +275,17 @@ async def main(config_path: str):
     """Main entry point"""
     config = load_config(config_path)
     relay = WebSocketRelay(config)
-    
+
     # Setup signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
-    
+
     def signal_handler():
         logger.info("Received shutdown signal")
         relay.running = False
-    
+
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
-    
+
     await relay.run()
 
 
@@ -303,12 +303,12 @@ if __name__ == '__main__':
         action='store_true',
         help='Enable verbose logging'
     )
-    
+
     args = parser.parse_args()
-    
+
     if args.verbose:
         logger.setLevel(logging.DEBUG)
-    
+
     try:
         asyncio.run(main(args.config))
     except KeyboardInterrupt:
