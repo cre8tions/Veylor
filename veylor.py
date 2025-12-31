@@ -27,11 +27,12 @@ logging.basicConfig(
 logger = logging.getLogger('veylor')
 
 
-class WebSocketRelay:
-    """High-performance non-blocking WebSocket relay"""
+class SourceRelay:
+    """Relay for a single WebSocket source with dedicated endpoints"""
 
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
+    def __init__(self, source_config: Dict[str, Any], performance_config: Dict[str, Any]):
+        self.source_config = source_config
+        self.performance_config = performance_config
         self.ws_clients: Set[websockets.ServerConnection] = set()
         self.unix_clients: Set[asyncio.StreamWriter] = set()
         self.running = True
@@ -122,12 +123,12 @@ class WebSocketRelay:
                 pass
             logger.info(f"Unix socket client disconnected: {peer}")
 
-    async def connect_to_source(self, source_config: Dict[str, Any]):
+    async def connect_to_source(self):
         """Connect to remote WebSocket source and relay messages"""
-        url = source_config['url']
-        headers = source_config.get('headers', {})
-        reconnect_delay = self.config.get('performance', {}).get('reconnect_delay', 5)
-        max_attempts = self.config.get('performance', {}).get('reconnect_max_attempts', 0)
+        url = self.source_config['url']
+        headers = self.source_config.get('headers', {})
+        reconnect_delay = self.performance_config.get('reconnect_delay', 5)
+        max_attempts = self.performance_config.get('reconnect_max_attempts', 0)
 
         attempt = 0
         while self.running:
@@ -169,32 +170,29 @@ class WebSocketRelay:
                     break
 
     async def start_websocket_server(self):
-        """Start WebSocket rebroadcast server"""
-        ws_config = self.config.get('rebroadcast', {}).get('websocket', {})
-        if not ws_config.get('enabled', True):
+        """Start WebSocket rebroadcast server for this source"""
+        ws_port = self.source_config.get('websocket_port')
+        if not ws_port:
             return
 
-        host = ws_config.get('host', '0.0.0.0')
-        port = ws_config.get('port', 8765)
+        host = self.source_config.get('websocket_host', '0.0.0.0')
 
-        logger.info(f"Starting WebSocket server on {host}:{port}")
-        server = await ws_serve(self.handle_websocket_client, host, port)
+        logger.info(f"Starting WebSocket server for source {self.source_config['url']} on {host}:{ws_port}")
+        server = await ws_serve(self.handle_websocket_client, host, ws_port)
         self.servers.append(server)
-        logger.info(f"WebSocket server started on {host}:{port}")
+        logger.info(f"WebSocket server started on {host}:{ws_port}")
 
     async def start_unix_server(self):
-        """Start Unix socket rebroadcast server"""
-        unix_config = self.config.get('rebroadcast', {}).get('unix_socket', {})
-        if not unix_config.get('enabled', True):
+        """Start Unix socket rebroadcast server for this source"""
+        socket_path = self.source_config.get('unix_socket_path')
+        if not socket_path:
             return
-
-        socket_path = unix_config.get('path', '/tmp/veylor.sock')
 
         # Remove existing socket file if it exists
         if os.path.exists(socket_path):
             os.remove(socket_path)
 
-        logger.info(f"Starting Unix socket server on {socket_path}")
+        logger.info(f"Starting Unix socket server for source {self.source_config['url']} on {socket_path}")
         server = await asyncio.start_unix_server(
             self.handle_unix_client,
             path=socket_path
@@ -203,39 +201,27 @@ class WebSocketRelay:
         logger.info(f"Unix socket server started on {socket_path}")
 
     async def run(self):
-        """Run the relay service"""
+        """Run this source relay"""
         try:
-            # Start rebroadcast servers
+            # Start rebroadcast servers for this source
             await asyncio.gather(
                 self.start_websocket_server(),
                 self.start_unix_server()
             )
 
-            # Connect to all sources
-            source_tasks = []
-            sources = self.config.get('sources', [])
-
-            if not sources:
-                logger.error("No sources configured!")
-                return
-
-            for source in sources:
-                task = asyncio.create_task(self.connect_to_source(source))
-                source_tasks.append(task)
-
-            # Wait for all source tasks to complete
-            await asyncio.gather(*source_tasks)
+            # Connect to the source
+            await self.connect_to_source()
 
         except asyncio.CancelledError:
-            logger.info("Relay service cancelled")
+            logger.info(f"Source relay cancelled for {self.source_config['url']}")
         except Exception as e:
-            logger.error(f"Error in relay service: {e}")
+            logger.error(f"Error in source relay for {self.source_config['url']}: {e}")
         finally:
             await self.shutdown()
 
     async def shutdown(self):
         """Graceful shutdown"""
-        logger.info("Shutting down...")
+        logger.info(f"Shutting down source relay for {self.source_config['url']}...")
         self.running = False
 
         # Close all WebSocket clients
@@ -258,7 +244,69 @@ class WebSocketRelay:
             server.close()
             await server.wait_closed()
 
-        logger.info("Shutdown complete")
+        # Clean up Unix socket files
+        socket_path = self.source_config.get('unix_socket_path')
+        if socket_path and os.path.exists(socket_path):
+            try:
+                os.remove(socket_path)
+            except:
+                pass
+
+        logger.info(f"Shutdown complete for {self.source_config['url']}")
+
+
+class WebSocketRelay:
+    """High-performance WebSocket relay orchestrator"""
+
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.source_relays = []
+        self.running = True
+
+    async def run(self):
+        """Run the relay service"""
+        try:
+            sources = self.config.get('sources', [])
+
+            if not sources:
+                logger.error("No sources configured!")
+                return
+
+            # Create a SourceRelay for each source
+            source_tasks = []
+            performance_config = self.config.get('performance', {})
+            
+            for source_config in sources:
+                source_relay = SourceRelay(source_config, performance_config)
+                self.source_relays.append(source_relay)
+                task = asyncio.create_task(source_relay.run())
+                source_tasks.append(task)
+
+            # Wait for all source relays to complete
+            await asyncio.gather(*source_tasks)
+
+        except asyncio.CancelledError:
+            logger.info("Relay service cancelled")
+        except Exception as e:
+            logger.error(f"Error in relay service: {e}")
+        finally:
+            await self.shutdown()
+
+    async def shutdown(self):
+        """Graceful shutdown"""
+        logger.info("Shutting down all source relays...")
+        self.running = False
+
+        # Shutdown all source relays
+        shutdown_tasks = []
+        for source_relay in self.source_relays:
+            source_relay.running = False
+            shutdown_tasks.append(asyncio.create_task(source_relay.shutdown()))
+        
+        if shutdown_tasks:
+            await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+
+        logger.info("All source relays shut down")
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
