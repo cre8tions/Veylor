@@ -236,7 +236,7 @@ class SourceRelay:
         if self.source_connection:
             try:
                 await self.source_connection.close()
-            except:
+            except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
                 pass
 
         # Close all WebSocket clients
@@ -251,7 +251,7 @@ class SourceRelay:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except:
+            except (OSError, asyncio.CancelledError):
                 pass
 
         # Close servers
@@ -264,7 +264,7 @@ class SourceRelay:
         if socket_path and os.path.exists(socket_path):
             try:
                 os.remove(socket_path)
-            except:
+            except OSError:
                 pass
 
         logger.info(f"Shutdown complete for {self.source_config['url']}")
@@ -303,6 +303,11 @@ class WebSocketRelay:
                 task = asyncio.create_task(source_relay.run())
                 self.source_tasks.append(task)
 
+            # Check if we have any valid sources to run
+            if not self.source_tasks:
+                logger.error("No valid sources configured. Exiting.")
+                return
+
             # Wait for all source relays to complete
             await asyncio.gather(*self.source_tasks)
 
@@ -325,7 +330,7 @@ class WebSocketRelay:
             if source_relay.source_connection:
                 try:
                     await source_relay.source_connection.close()
-                except:
+                except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
                     pass
 
         # Cancel all running tasks
