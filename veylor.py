@@ -177,10 +177,14 @@ class SourceRelay:
 
         host = self.source_config.get('websocket_host', '0.0.0.0')
 
-        logger.info(f"Starting WebSocket server for source {self.source_config['url']} on {host}:{ws_port}")
-        server = await ws_serve(self.handle_websocket_client, host, ws_port)
-        self.servers.append(server)
-        logger.info(f"WebSocket server started on {host}:{ws_port}")
+        try:
+            logger.info(f"Starting WebSocket server for source {self.source_config['url']} on {host}:{ws_port}")
+            server = await ws_serve(self.handle_websocket_client, host, ws_port)
+            self.servers.append(server)
+            logger.info(f"WebSocket server started on {host}:{ws_port}")
+        except Exception as e:
+            logger.error(f"Failed to start WebSocket server on {host}:{ws_port}: {e}")
+            raise
 
     async def start_unix_server(self):
         """Start Unix socket rebroadcast server for this source"""
@@ -188,17 +192,21 @@ class SourceRelay:
         if not socket_path:
             return
 
-        # Remove existing socket file if it exists
-        if os.path.exists(socket_path):
-            os.remove(socket_path)
+        try:
+            # Remove existing socket file if it exists
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
 
-        logger.info(f"Starting Unix socket server for source {self.source_config['url']} on {socket_path}")
-        server = await asyncio.start_unix_server(
-            self.handle_unix_client,
-            path=socket_path
-        )
-        self.servers.append(server)
-        logger.info(f"Unix socket server started on {socket_path}")
+            logger.info(f"Starting Unix socket server for source {self.source_config['url']} on {socket_path}")
+            server = await asyncio.start_unix_server(
+                self.handle_unix_client,
+                path=socket_path
+            )
+            self.servers.append(server)
+            logger.info(f"Unix socket server started on {socket_path}")
+        except Exception as e:
+            logger.error(f"Failed to start Unix socket server on {socket_path}: {e}")
+            raise
 
     async def run(self):
         """Run this source relay"""
@@ -280,10 +288,16 @@ class WebSocketRelay:
                 logger.error("No sources configured!")
                 return
 
-            # Create a SourceRelay for each source
+            # Validate and create a SourceRelay for each source
             performance_config = self.config.get('performance', {})
             
             for source_config in sources:
+                # Validate that source has at least one endpoint
+                if not source_config.get('websocket_port') and not source_config.get('unix_socket_path'):
+                    logger.error(f"Source {source_config.get('url', 'unknown')} has no endpoints configured. "
+                                f"Please specify at least one of: websocket_port, unix_socket_path")
+                    continue
+                
                 source_relay = SourceRelay(source_config, performance_config)
                 self.source_relays.append(source_relay)
                 task = asyncio.create_task(source_relay.run())
