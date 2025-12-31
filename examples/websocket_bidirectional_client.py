@@ -51,10 +51,17 @@ async def bidirectional_communication(url, send_interval):
             logger.info(f"Connected to {url}")
             
             # Run send and receive concurrently
-            await asyncio.gather(
+            # Use return_exceptions=True to handle failures gracefully
+            results = await asyncio.gather(
                 send_messages(websocket, send_interval),
-                receive_messages(websocket)
+                receive_messages(websocket),
+                return_exceptions=True
             )
+            
+            # Log any exceptions that occurred
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Task failed: {result}")
                 
     except Exception as e:
         logger.error(f"Error: {e}")

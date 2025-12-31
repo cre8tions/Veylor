@@ -83,10 +83,17 @@ async def bidirectional_communication(socket_path, send_interval):
         logger.info(f"Connected to {socket_path}")
         
         # Run send and receive concurrently
-        await asyncio.gather(
+        # Use return_exceptions=True to handle failures gracefully
+        results = await asyncio.gather(
             send_messages(writer, send_interval),
-            receive_messages(reader)
+            receive_messages(reader),
+            return_exceptions=True
         )
+        
+        # Log any exceptions that occurred
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Task failed: {result}")
             
     except Exception as e:
         logger.error(f"Error: {e}")
