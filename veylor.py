@@ -17,7 +17,6 @@ from websockets.asyncio.server import serve as ws_serve
 from websockets.asyncio.client import connect as ws_connect
 import yaml
 import argparse
-import json
 
 
 # Configure logging
@@ -28,11 +27,12 @@ logging.basicConfig(
 logger = logging.getLogger('veylor')
 
 
-class WebSocketRelay:
-    """High-performance non-blocking WebSocket relay"""
+class SourceRelay:
+    """Relay for a single WebSocket source with dedicated endpoints"""
 
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
+    def __init__(self, source_config: Dict[str, Any], performance_config: Dict[str, Any]):
+        self.source_config = source_config
+        self.performance_config = performance_config
         self.ws_clients: Set[websockets.ServerConnection] = set()
         self.unix_clients: Set[asyncio.StreamWriter] = set()
         self.running = True
@@ -123,31 +123,12 @@ class WebSocketRelay:
                 pass
             logger.info(f"Unix socket client disconnected: {peer}")
 
-    def wrap_message_with_source(self, message: str, source_name: str) -> bytes:
-        """Wrap a message with source name for identification"""
-        # Parse the message as JSON if possible
-        try:
-            message_data = json.loads(message)
-        except json.JSONDecodeError:
-            # If not JSON, treat as plain text
-            message_data = message
-        
-        # Wrap the message with source name
-        wrapped_message = {
-            'source': source_name,
-            'data': message_data
-        }
-        
-        # Convert back to JSON string and encode
-        return json.dumps(wrapped_message).encode('utf-8')
-
-    async def connect_to_source(self, source_config: Dict[str, Any]):
+    async def connect_to_source(self):
         """Connect to remote WebSocket source and relay messages"""
-        url = source_config['url']
-        source_name = source_config.get('name', url)  # Use URL as fallback if name not provided
-        headers = source_config.get('headers', {})
-        reconnect_delay = self.config.get('performance', {}).get('reconnect_delay', 5)
-        max_attempts = self.config.get('performance', {}).get('reconnect_max_attempts', 0)
+        url = self.source_config['url']
+        headers = self.source_config.get('headers', {})
+        reconnect_delay = self.performance_config.get('reconnect_delay', 5)
+        max_attempts = self.performance_config.get('reconnect_max_attempts', 0)
 
         attempt = 0
         while self.running:
@@ -173,19 +154,12 @@ class WebSocketRelay:
                         if not self.running:
                             break
 
-                        # Convert message to string if it's binary
-                        if isinstance(message, bytes):
-                            try:
-                                message = message.decode('utf-8')
-                            except UnicodeDecodeError:
-                                # If can't decode, use replacement characters
-                                message = message.decode('utf-8', errors='replace')
-                        
-                        # Wrap the message with source name
-                        wrapped_message = self.wrap_message_with_source(message, source_name)
+                        # Handle both text and binary messages
+                        if isinstance(message, str):
+                            message = message.encode('utf-8')
 
                         # Broadcast to all clients (non-blocking)
-                        await self.broadcast_message(wrapped_message)
+                        await self.broadcast_message(message)
 
             except asyncio.CancelledError:
                 logger.info(f"Source connection cancelled: {url}")
@@ -196,74 +170,74 @@ class WebSocketRelay:
                     break
 
     async def start_websocket_server(self):
-        """Start WebSocket rebroadcast server"""
-        ws_config = self.config.get('rebroadcast', {}).get('websocket', {})
-        if not ws_config.get('enabled', True):
+        """Start WebSocket rebroadcast server for this source"""
+        ws_port = self.source_config.get('websocket_port')
+        if not ws_port:
             return
 
-        host = ws_config.get('host', '0.0.0.0')
-        port = ws_config.get('port', 8765)
+        host = self.source_config.get('websocket_host', '0.0.0.0')
 
-        logger.info(f"Starting WebSocket server on {host}:{port}")
-        server = await ws_serve(self.handle_websocket_client, host, port)
-        self.servers.append(server)
-        logger.info(f"WebSocket server started on {host}:{port}")
+        try:
+            logger.info(f"Starting WebSocket server for source {self.source_config['url']} on {host}:{ws_port}")
+            server = await ws_serve(self.handle_websocket_client, host, ws_port)
+            self.servers.append(server)
+            logger.info(f"WebSocket server started on {host}:{ws_port}")
+        except Exception as e:
+            logger.error(f"Failed to start WebSocket server on {host}:{ws_port}: {e}")
+            raise
 
     async def start_unix_server(self):
-        """Start Unix socket rebroadcast server"""
-        unix_config = self.config.get('rebroadcast', {}).get('unix_socket', {})
-        if not unix_config.get('enabled', True):
+        """Start Unix socket rebroadcast server for this source"""
+        socket_path = self.source_config.get('unix_socket_path')
+        if not socket_path:
             return
 
-        socket_path = unix_config.get('path', '/tmp/veylor.sock')
+        try:
+            # Remove existing socket file if it exists
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
 
-        # Remove existing socket file if it exists
-        if os.path.exists(socket_path):
-            os.remove(socket_path)
-
-        logger.info(f"Starting Unix socket server on {socket_path}")
-        server = await asyncio.start_unix_server(
-            self.handle_unix_client,
-            path=socket_path
-        )
-        self.servers.append(server)
-        logger.info(f"Unix socket server started on {socket_path}")
+            logger.info(f"Starting Unix socket server for source {self.source_config['url']} on {socket_path}")
+            server = await asyncio.start_unix_server(
+                self.handle_unix_client,
+                path=socket_path
+            )
+            self.servers.append(server)
+            logger.info(f"Unix socket server started on {socket_path}")
+        except Exception as e:
+            logger.error(f"Failed to start Unix socket server on {socket_path}: {e}")
+            raise
 
     async def run(self):
-        """Run the relay service"""
+        """Run this source relay"""
         try:
-            # Start rebroadcast servers
+            # Start rebroadcast servers for this source
             await asyncio.gather(
                 self.start_websocket_server(),
                 self.start_unix_server()
             )
 
-            # Connect to all sources
-            source_tasks = []
-            sources = self.config.get('sources', [])
-
-            if not sources:
-                logger.error("No sources configured!")
-                return
-
-            for source in sources:
-                task = asyncio.create_task(self.connect_to_source(source))
-                source_tasks.append(task)
-
-            # Wait for all source tasks to complete
-            await asyncio.gather(*source_tasks)
+            # Connect to the source
+            await self.connect_to_source()
 
         except asyncio.CancelledError:
-            logger.info("Relay service cancelled")
+            logger.info(f"Source relay cancelled for {self.source_config['url']}")
         except Exception as e:
-            logger.error(f"Error in relay service: {e}")
+            logger.error(f"Error in source relay for {self.source_config['url']}: {e}")
         finally:
             await self.shutdown()
 
     async def shutdown(self):
         """Graceful shutdown"""
-        logger.info("Shutting down...")
+        logger.info(f"Shutting down source relay for {self.source_config['url']}...")
         self.running = False
+
+        # Close source connection to break out of receive loop
+        if self.source_connection:
+            try:
+                await self.source_connection.close()
+            except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
+                pass
 
         # Close all WebSocket clients
         ws_close_tasks = []
@@ -277,7 +251,7 @@ class WebSocketRelay:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except:
+            except (OSError, asyncio.CancelledError):
                 pass
 
         # Close servers
@@ -285,7 +259,90 @@ class WebSocketRelay:
             server.close()
             await server.wait_closed()
 
-        logger.info("Shutdown complete")
+        # Clean up Unix socket files
+        socket_path = self.source_config.get('unix_socket_path')
+        if socket_path and os.path.exists(socket_path):
+            try:
+                os.remove(socket_path)
+            except OSError:
+                pass
+
+        logger.info(f"Shutdown complete for {self.source_config['url']}")
+
+
+class WebSocketRelay:
+    """High-performance WebSocket relay orchestrator"""
+
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.source_relays = []
+        self.source_tasks = []
+        self.running = True
+
+    async def run(self):
+        """Run the relay service"""
+        try:
+            sources = self.config.get('sources', [])
+
+            if not sources:
+                logger.error("No sources configured!")
+                return
+
+            # Validate and create a SourceRelay for each source
+            performance_config = self.config.get('performance', {})
+            
+            for source_config in sources:
+                # Validate that source has at least one endpoint
+                if not source_config.get('websocket_port') and not source_config.get('unix_socket_path'):
+                    logger.error(f"Source {source_config.get('url', 'unknown')} has no endpoints configured. "
+                                f"Please specify at least one of: websocket_port, unix_socket_path")
+                    continue
+                
+                source_relay = SourceRelay(source_config, performance_config)
+                self.source_relays.append(source_relay)
+                task = asyncio.create_task(source_relay.run())
+                self.source_tasks.append(task)
+
+            # Check if we have any valid sources to run
+            if not self.source_tasks:
+                logger.error("No valid sources configured. Exiting.")
+                return
+
+            # Wait for all source relays to complete
+            await asyncio.gather(*self.source_tasks)
+
+        except asyncio.CancelledError:
+            logger.info("Relay service cancelled")
+        except Exception as e:
+            logger.error(f"Error in relay service: {e}")
+        finally:
+            await self.shutdown()
+
+    async def shutdown(self):
+        """Graceful shutdown"""
+        logger.info("Shutting down all source relays...")
+        self.running = False
+
+        # First, set all source relays to stop running
+        for source_relay in self.source_relays:
+            source_relay.running = False
+            # Close source connections to break out of receive loops
+            if source_relay.source_connection:
+                try:
+                    await source_relay.source_connection.close()
+                except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
+                    pass
+
+        # Cancel all running tasks
+        for task in self.source_tasks:
+            if not task.done():
+                task.cancel()
+
+        # Wait for tasks to complete/cancel with their own cleanup
+        if self.source_tasks:
+            await asyncio.gather(*self.source_tasks, return_exceptions=True)
+
+        logger.info("All source relays shut down")
 
 
 def load_config(config_path: str) -> Dict[str, Any]:

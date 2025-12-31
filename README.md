@@ -7,6 +7,7 @@ Veylor is a fast, efficient, non-blocking Python application that connects to re
 
 - **Non-blocking async I/O**: Built with `asyncio` for maximum throughput and efficiency
 - **Multiple source support**: Connect to multiple remote WebSocket sources
+- **Per-source endpoints**: Each source can have its own WebSocket port and/or Unix socket
 - **Dual rebroadcast modes**: 
   - WebSocket server for network clients
   - Unix domain sockets for local IPC
@@ -38,19 +39,17 @@ Edit `config.yaml` to configure your sources and rebroadcast endpoints:
 ```yaml
 sources:
   - url: "wss://example.com/websocket"
-    name: "source1"  # Identifier for this source in rebroadcast messages
     headers:
       Authorization: "Bearer your-token"
-
-rebroadcast:
-  websocket:
-    enabled: true
-    host: "0.0.0.0"
-    port: 8765
+    # Rebroadcast on WebSocket port 8765
+    websocket_port: 8765
+    # Optional: also rebroadcast on Unix socket
+    # unix_socket_path: "/tmp/veylor_source1.sock"
   
-  unix_socket:
-    enabled: true
-    path: "/tmp/veylor.sock"
+  # Another source on a different port
+  - url: "wss://api.example.com/feed"
+    websocket_port: 8766
+    unix_socket_path: "/tmp/veylor_feed.sock"
 
 performance:
   max_queue_size: 1000
@@ -58,14 +57,14 @@ performance:
   reconnect_max_attempts: 0  # 0 for infinite
 ```
 
-### Source Message Wrapping
+### Per-Source Configuration
 
-Veylor automatically wraps messages from each source with the source name for identification:
+Each source can be configured with:
+- `websocket_port`: Local port for WebSocket clients to connect (optional)
+- `websocket_host`: Host to bind WebSocket server (default: `0.0.0.0`)
+- `unix_socket_path`: Local Unix socket path for IPC clients (optional)
 
-- **Original message from source**: `{"id": 1, "data": "test"}`
-- **Rebroadcast message**: `{"source": "source1", "data": {"id": 1, "data": "test"}}`
-
-If a source doesn't have a `name` field in the configuration, the URL will be used as the source identifier.
+**Note**: Each source must have at least one endpoint configured (`websocket_port` or `unix_socket_path`).
 
 ## Usage
 
@@ -122,12 +121,21 @@ asyncio.run(receive_from_unix())
 
 ## Architecture
 
-Veylor uses a fully asynchronous architecture for maximum performance:
+Veylor uses a fully asynchronous architecture with per-source isolation:
 
-1. **Source Connection**: Establishes WebSocket connection(s) to remote sources
-2. **Message Reception**: Receives messages from source(s) in non-blocking manner
-3. **Concurrent Broadcasting**: Broadcasts messages to all connected clients concurrently using `asyncio.gather()`
-4. **Client Management**: Automatically handles client connections/disconnections
+1. **Per-Source Relays**: Each WebSocket source gets its own dedicated relay instance
+2. **Independent Endpoints**: Each source can have its own WebSocket port and/or Unix socket
+3. **Source Connection**: Establishes WebSocket connection to remote source with auto-reconnect
+4. **Message Reception**: Receives messages from source in non-blocking manner
+5. **Concurrent Broadcasting**: Broadcasts messages to all clients of that source concurrently using `asyncio.gather()`
+6. **Client Management**: Automatically handles client connections/disconnections per source
+
+### Architecture Benefits
+
+- **Isolation**: Issues with one source don't affect others
+- **Flexibility**: Different sources can use different endpoint types
+- **Scalability**: Easy to add new sources without affecting existing ones
+- **Performance**: Each source has its own broadcast pipeline
 
 ### Performance Characteristics
 

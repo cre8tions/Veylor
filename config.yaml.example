@@ -3,23 +3,24 @@
 # Remote WebSocket source(s) to connect to
 sources:
   - url: "wss://example.com/websocket"
-    name: "source1"  # Name to identify this source in rebroadcast messages
     # Optional: headers for authentication
     # headers:
     #   Authorization: "Bearer token"
-
-# Rebroadcast endpoints
-rebroadcast:
-  # WebSocket server configuration
-  websocket:
-    enabled: true
-    host: "0.0.0.0"
-    port: 8765
+    # Optional: WebSocket rebroadcast port for this source
+    websocket_port: 8765
+    # Optional: WebSocket bind host (defaults to 0.0.0.0)
+    # websocket_host: "0.0.0.0"
+    # Optional: Unix socket path for this source
+    # unix_socket_path: "/tmp/veylor_source1.sock"
   
-  # Unix socket configuration
-  unix_socket:
-    enabled: true
-    path: "/tmp/veylor.sock"
+  # Example with Unix socket only
+  # - url: "wss://example.com/websocket2"
+  #   unix_socket_path: "/tmp/veylor_source2.sock"
+  
+  # Example with both endpoints
+  # - url: "wss://example.com/websocket3"
+  #   websocket_port: 8766
+  #   unix_socket_path: "/tmp/veylor_source3.sock"
 
 # Performance tuning
 performance:

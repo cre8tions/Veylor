@@ -3,20 +3,8 @@
 # Remote WebSocket source(s) to connect to
 sources:
   - url: "ws://localhost:9999"
-    name: "test_server"
-
-# Rebroadcast endpoints
-rebroadcast:
-  # WebSocket server configuration
-  websocket:
-    enabled: true
-    host: "127.0.0.1"
-    port: 8765
-  
-  # Unix socket configuration
-  unix_socket:
-    enabled: true
-    path: "/tmp/veylor.sock"
+    websocket_port: 8765
+    unix_socket_path: "/tmp/veylor.sock"
 
 # Performance tuning
 performance:
