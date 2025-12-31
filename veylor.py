@@ -89,8 +89,16 @@ class SourceRelay:
         logger.info(f"WebSocket client connected: {client_addr}")
 
         try:
-            # Keep connection alive - client will receive broadcasts
-            await websocket.wait_closed()
+            # Listen for messages from client and forward to source
+            async for message in websocket:
+                if self.source_connection:
+                    try:
+                        await self.source_connection.send(message)
+                        logger.debug(f"Forwarded message from client {client_addr} to source")
+                    except Exception as e:
+                        logger.error(f"Error forwarding message to source: {e}")
+                else:
+                    logger.warning(f"Cannot forward message from {client_addr}: no source connection")
         except Exception as e:
             logger.error(f"WebSocket client error: {e}")
         finally:
@@ -105,13 +113,29 @@ class SourceRelay:
         logger.info(f"Unix socket client connected: {peer}")
 
         try:
-            # Keep connection alive - client will receive broadcasts
+            # Listen for messages from client and forward to source
             while self.running:
-                # Read to detect disconnection
-                data = await reader.read(1024)
-                if not data:
+                # Read 4-byte length prefix
+                length_data = await reader.read(4)
+                if not length_data or len(length_data) < 4:
                     break
-                # Echo back or ignore based on protocol
+                
+                msg_len = int.from_bytes(length_data, byteorder='big')
+                
+                # Read message data
+                message = await reader.read(msg_len)
+                if not message:
+                    break
+                
+                # Forward message to source WebSocket
+                if self.source_connection:
+                    try:
+                        await self.source_connection.send(message)
+                        logger.debug(f"Forwarded message from Unix client {peer} to source")
+                    except Exception as e:
+                        logger.error(f"Error forwarding message to source: {e}")
+                else:
+                    logger.warning(f"Cannot forward message from {peer}: no source connection")
         except Exception as e:
             logger.error(f"Unix socket client error: {e}")
         finally:

@@ -16,13 +16,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('test_server')
 
 
-async def send_test_messages(websocket, path):
-    """Send test messages to connected clients"""
-    client_addr = websocket.remote_address
-    logger.info(f"Client connected: {client_addr}")
-    
+async def send_test_messages(websocket):
+    """Send periodic test messages to connected clients"""
+    counter = 0
     try:
-        counter = 0
         while True:
             # Generate test message
             message = {
@@ -39,15 +36,44 @@ async def send_test_messages(websocket, path):
             await asyncio.sleep(1)  # Send message every second
             
     except websockets.exceptions.ConnectionClosed:
-        logger.info(f"Client disconnected: {client_addr}")
+        pass
+    except Exception as e:
+        logger.error(f"Error sending: {e}")
+
+
+async def receive_messages(websocket):
+    """Receive messages from clients (forwarded from Veylor)"""
+    try:
+        async for message in websocket:
+            logger.info(f"Received from client: {message}")
+            
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    except Exception as e:
+        logger.error(f"Error receiving: {e}")
+
+
+async def handle_client(websocket, path):
+    """Handle bidirectional communication with connected clients"""
+    client_addr = websocket.remote_address
+    logger.info(f"Client connected: {client_addr}")
+    
+    try:
+        # Run send and receive concurrently
+        await asyncio.gather(
+            send_test_messages(websocket),
+            receive_messages(websocket)
+        )
     except Exception as e:
         logger.error(f"Error: {e}")
+    finally:
+        logger.info(f"Client disconnected: {client_addr}")
 
 
 async def main(host, port):
     """Start test WebSocket server"""
     logger.info(f"Starting test WebSocket server on {host}:{port}")
-    async with serve(send_test_messages, host, port):
+    async with serve(handle_client, host, port):
         logger.info(f"Test server running on ws://{host}:{port}")
         await asyncio.Future()  # Run forever
 

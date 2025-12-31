@@ -8,6 +8,7 @@ Veylor is a fast, efficient, non-blocking Python application that connects to re
 - **Non-blocking async I/O**: Built with `asyncio` for maximum throughput and efficiency
 - **Multiple source support**: Connect to multiple remote WebSocket sources
 - **Per-source endpoints**: Each source can have its own WebSocket port and/or Unix socket
+- **Bidirectional communication**: Clients can send messages back to the source WebSocket
 - **Dual rebroadcast modes**: 
   - WebSocket server for network clients
   - Unix domain sockets for local IPC
@@ -119,14 +120,67 @@ async def receive_from_unix():
 asyncio.run(receive_from_unix())
 ```
 
+### Bidirectional Communication
+
+Veylor supports 2-way communication - clients can send messages back to the source WebSocket.
+
+**WebSocket Client (Send & Receive):**
+
+```python
+import asyncio
+import websockets
+
+async def bidirectional():
+    async with websockets.connect('ws://localhost:8765') as websocket:
+        # Send a message to the source
+        await websocket.send("Hello from client")
+        
+        # Receive messages from the source
+        async for message in websocket:
+            print(f"Received: {message}")
+
+asyncio.run(bidirectional())
+```
+
+**Unix Socket Client (Send & Receive):**
+
+```python
+import asyncio
+
+async def bidirectional_unix():
+    reader, writer = await asyncio.open_unix_connection('/tmp/veylor.sock')
+    
+    # Send a message to the source
+    message = b"Hello from Unix client"
+    msg_len = len(message)
+    writer.write(msg_len.to_bytes(4, byteorder='big'))
+    writer.write(message)
+    await writer.drain()
+    
+    # Receive messages from the source
+    while True:
+        length_data = await reader.read(4)
+        if not length_data or len(length_data) < 4:
+            break
+        msg_len = int.from_bytes(length_data, byteorder='big')
+        message = await reader.read(msg_len)
+        print(f"Received: {message.decode('utf-8')}")
+
+asyncio.run(bidirectional_unix())
+```
+
+See `examples/websocket_bidirectional_client.py` and `examples/unix_socket_bidirectional_client.py` for complete examples.
+
 ## Architecture
 
-Veylor uses a fully asynchronous architecture with per-source isolation:
+Veylor uses a fully asynchronous architecture with per-source isolation and bidirectional message flow:
 
 1. **Per-Source Relays**: Each WebSocket source gets its own dedicated relay instance
 2. **Independent Endpoints**: Each source can have its own WebSocket port and/or Unix socket
 3. **Source Connection**: Establishes WebSocket connection to remote source with auto-reconnect
-4. **Message Reception**: Receives messages from source in non-blocking manner
+4. **Bidirectional Message Flow**: 
+   - **Source → Clients**: Messages from source are broadcast to all connected clients concurrently
+   - **Clients → Source**: Messages from clients are forwarded back to the source WebSocket
 5. **Concurrent Broadcasting**: Broadcasts messages to all clients of that source concurrently using `asyncio.gather()`
 6. **Client Management**: Automatically handles client connections/disconnections per source
 
