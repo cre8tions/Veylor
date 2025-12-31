@@ -36,6 +36,9 @@ async def send_messages(writer, interval):
 
 async def receive_messages(reader):
     """Receive messages from Veylor via Unix socket"""
+    # Maximum message size (10 MB)
+    MAX_MESSAGE_SIZE = 10 * 1024 * 1024
+    
     try:
         while True:
             # Read 4-byte length prefix
@@ -46,9 +49,24 @@ async def receive_messages(reader):
             
             msg_len = struct.unpack('>I', length_data)[0]
             
-            # Read message
-            message = await reader.read(msg_len)
-            if not message:
+            # Validate message length
+            if msg_len <= 0 or msg_len > MAX_MESSAGE_SIZE:
+                logger.error(f"Invalid message length: {msg_len}")
+                break
+            
+            # Read exact number of bytes for the message
+            message = b''
+            remaining = msg_len
+            while remaining > 0:
+                chunk = await reader.read(min(remaining, 8192))
+                if not chunk:
+                    break
+                message += chunk
+                remaining -= len(chunk)
+            
+            # Verify we received complete message
+            if len(message) != msg_len:
+                logger.error(f"Incomplete message: expected {msg_len}, got {len(message)}")
                 break
                 
             logger.info(f"Received ({msg_len} bytes): {message.decode('utf-8', errors='replace')}")

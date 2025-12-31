@@ -111,6 +111,9 @@ class SourceRelay:
         self.unix_clients.add(writer)
         peer = writer.get_extra_info('peername', 'unknown')
         logger.info(f"Unix socket client connected: {peer}")
+        
+        # Maximum message size (10 MB)
+        MAX_MESSAGE_SIZE = 10 * 1024 * 1024
 
         try:
             # Listen for messages from client and forward to source
@@ -122,9 +125,24 @@ class SourceRelay:
                 
                 msg_len = int.from_bytes(length_data, byteorder='big')
                 
-                # Read message data
-                message = await reader.read(msg_len)
-                if not message:
+                # Validate message length
+                if msg_len <= 0 or msg_len > MAX_MESSAGE_SIZE:
+                    logger.error(f"Invalid message length from {peer}: {msg_len}")
+                    break
+                
+                # Read exact number of bytes for the message
+                message = b''
+                remaining = msg_len
+                while remaining > 0:
+                    chunk = await reader.read(min(remaining, 8192))
+                    if not chunk:
+                        break
+                    message += chunk
+                    remaining -= len(chunk)
+                
+                # Verify we received complete message
+                if len(message) != msg_len:
+                    logger.error(f"Incomplete message from {peer}: expected {msg_len}, got {len(message)}")
                     break
                 
                 # Forward message to source WebSocket

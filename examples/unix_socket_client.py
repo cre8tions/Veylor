@@ -16,6 +16,9 @@ async def receive_from_unix(socket_path):
     """Connect to Veylor Unix socket and receive messages"""
     logger.info(f"Connecting to {socket_path}")
     
+    # Maximum message size (10 MB)
+    MAX_MESSAGE_SIZE = 10 * 1024 * 1024
+    
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path)
         logger.info(f"Connected to {socket_path}")
@@ -29,9 +32,24 @@ async def receive_from_unix(socket_path):
             
             msg_len = struct.unpack('>I', length_data)[0]
             
-            # Read message
-            message = await reader.read(msg_len)
-            if not message:
+            # Validate message length
+            if msg_len <= 0 or msg_len > MAX_MESSAGE_SIZE:
+                logger.error(f"Invalid message length: {msg_len}")
+                break
+            
+            # Read exact number of bytes for the message
+            message = b''
+            remaining = msg_len
+            while remaining > 0:
+                chunk = await reader.read(min(remaining, 8192))
+                if not chunk:
+                    break
+                message += chunk
+                remaining -= len(chunk)
+            
+            # Verify we received complete message
+            if len(message) != msg_len:
+                logger.error(f"Incomplete message: expected {msg_len}, got {len(message)}")
                 break
                 
             logger.info(f"Received ({msg_len} bytes): {message.decode('utf-8', errors='replace')}")
