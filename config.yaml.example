@@ -3,7 +3,6 @@
 # Remote WebSocket source(s) to connect to
 sources:
   - url: "wss://example.com/websocket"
-    name: "source1"  # Name to identify this source in rebroadcast messages
     # Optional: headers for authentication
     # headers:
     #   Authorization: "Bearer token"

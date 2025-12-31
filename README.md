@@ -38,7 +38,6 @@ Edit `config.yaml` to configure your sources and rebroadcast endpoints:
 ```yaml
 sources:
   - url: "wss://example.com/websocket"
-    name: "source1"  # Identifier for this source in rebroadcast messages
     headers:
       Authorization: "Bearer your-token"
 
@@ -57,15 +56,6 @@ performance:
   reconnect_delay: 5
   reconnect_max_attempts: 0  # 0 for infinite
 ```
-
-### Source Message Wrapping
-
-Veylor automatically wraps messages from each source with the source name for identification:
-
-- **Original message from source**: `{"id": 1, "data": "test"}`
-- **Rebroadcast message**: `{"source": "source1", "data": {"id": 1, "data": "test"}}`
-
-If a source doesn't have a `name` field in the configuration, the URL will be used as the source identifier.
 
 ## Usage
 

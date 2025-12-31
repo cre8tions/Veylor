@@ -17,7 +17,6 @@ from websockets.asyncio.server import serve as ws_serve
 from websockets.asyncio.client import connect as ws_connect
 import yaml
 import argparse
-import json
 
 
 # Configure logging
@@ -123,28 +122,9 @@ class WebSocketRelay:
                 pass
             logger.info(f"Unix socket client disconnected: {peer}")
 
-    def wrap_message_with_source(self, message: str, source_name: str) -> bytes:
-        """Wrap a message with source name for identification"""
-        # Parse the message as JSON if possible
-        try:
-            message_data = json.loads(message)
-        except json.JSONDecodeError:
-            # If not JSON, treat as plain text
-            message_data = message
-        
-        # Wrap the message with source name
-        wrapped_message = {
-            'source': source_name,
-            'data': message_data
-        }
-        
-        # Convert back to JSON string and encode
-        return json.dumps(wrapped_message).encode('utf-8')
-
     async def connect_to_source(self, source_config: Dict[str, Any]):
         """Connect to remote WebSocket source and relay messages"""
         url = source_config['url']
-        source_name = source_config.get('name', url)  # Use URL as fallback if name not provided
         headers = source_config.get('headers', {})
         reconnect_delay = self.config.get('performance', {}).get('reconnect_delay', 5)
         max_attempts = self.config.get('performance', {}).get('reconnect_max_attempts', 0)
@@ -173,19 +153,12 @@ class WebSocketRelay:
                         if not self.running:
                             break
 
-                        # Convert message to string if it's binary
-                        if isinstance(message, bytes):
-                            try:
-                                message = message.decode('utf-8')
-                            except UnicodeDecodeError:
-                                # If can't decode, use replacement characters
-                                message = message.decode('utf-8', errors='replace')
-                        
-                        # Wrap the message with source name
-                        wrapped_message = self.wrap_message_with_source(message, source_name)
+                        # Handle both text and binary messages
+                        if isinstance(message, str):
+                            message = message.encode('utf-8')
 
                         # Broadcast to all clients (non-blocking)
-                        await self.broadcast_message(wrapped_message)
+                        await self.broadcast_message(message)
 
             except asyncio.CancelledError:
                 logger.info(f"Source connection cancelled: {url}")
