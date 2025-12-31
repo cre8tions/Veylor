@@ -123,6 +123,24 @@ class WebSocketRelay:
                 pass
             logger.info(f"Unix socket client disconnected: {peer}")
 
+    def wrap_message_with_source(self, message: str, source_name: str) -> bytes:
+        """Wrap a message with source name for identification"""
+        # Parse the message as JSON if possible
+        try:
+            message_data = json.loads(message)
+        except json.JSONDecodeError:
+            # If not JSON, treat as plain text
+            message_data = message
+        
+        # Wrap the message with source name
+        wrapped_message = {
+            'source': source_name,
+            'data': message_data
+        }
+        
+        # Convert back to JSON string and encode
+        return json.dumps(wrapped_message).encode('utf-8')
+
     async def connect_to_source(self, source_config: Dict[str, Any]):
         """Connect to remote WebSocket source and relay messages"""
         url = source_config['url']
@@ -155,43 +173,19 @@ class WebSocketRelay:
                         if not self.running:
                             break
 
-                        # Handle both text and binary messages
-                        if isinstance(message, str):
-                            # Parse the message as JSON if possible
+                        # Convert message to string if it's binary
+                        if isinstance(message, bytes):
                             try:
-                                message_data = json.loads(message)
-                            except json.JSONDecodeError:
-                                # If not JSON, treat as plain text
-                                message_data = message
-                            
-                            # Wrap the message with source name
-                            wrapped_message = {
-                                'source': source_name,
-                                'data': message_data
-                            }
-                            
-                            # Convert back to JSON string and encode
-                            message = json.dumps(wrapped_message).encode('utf-8')
-                        else:
-                            # For binary messages, try to decode and wrap
-                            try:
-                                decoded = message.decode('utf-8')
-                                message_data = json.loads(decoded)
-                                wrapped_message = {
-                                    'source': source_name,
-                                    'data': message_data
-                                }
-                                message = json.dumps(wrapped_message).encode('utf-8')
-                            except (UnicodeDecodeError, json.JSONDecodeError):
-                                # If can't decode or parse, wrap as binary data
-                                wrapped_message = {
-                                    'source': source_name,
-                                    'data': message.decode('utf-8', errors='replace')
-                                }
-                                message = json.dumps(wrapped_message).encode('utf-8')
+                                message = message.decode('utf-8')
+                            except UnicodeDecodeError:
+                                # If can't decode, use replacement characters
+                                message = message.decode('utf-8', errors='replace')
+                        
+                        # Wrap the message with source name
+                        wrapped_message = self.wrap_message_with_source(message, source_name)
 
                         # Broadcast to all clients (non-blocking)
-                        await self.broadcast_message(message)
+                        await self.broadcast_message(wrapped_message)
 
             except asyncio.CancelledError:
                 logger.info(f"Source connection cancelled: {url}")
