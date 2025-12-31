@@ -3,6 +3,7 @@
 # Remote WebSocket source(s) to connect to
 sources:
   - url: "ws://localhost:9999"
+    name: "test_server"
 
 # Rebroadcast endpoints
 rebroadcast:
