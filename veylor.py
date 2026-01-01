@@ -24,7 +24,7 @@ import argparse
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger('veylor')
 
@@ -40,14 +40,14 @@ class SourceRelay:
         self.running = True
         self.source_connection = None
         self.servers = []
-        
+
         # Metrics tracking
         self.metrics = {
             'messages_from_source': 0,
             'messages_to_source': 0,
             'bytes_from_source': 0,
             'bytes_to_source': 0,
-            'message_timestamps': deque(maxlen=1000),  # Keep last 1000 message timestamps
+            'message_timestamps': deque(maxlen=50000),  # Keep last 1000 message timestamps
             'start_time': time.time(),
             'last_message_time': None,
             'source_connected_at': None,
@@ -61,7 +61,7 @@ class SourceRelay:
         self.metrics['bytes_from_source'] += len(message)
         self.metrics['last_message_time'] = now
         self.metrics['message_timestamps'].append(now)
-        
+
         # Broadcast to WebSocket clients
         if self.ws_clients:
             # Use asyncio.gather for concurrent sending
@@ -118,7 +118,7 @@ class SourceRelay:
                         msg_bytes = message if isinstance(message, bytes) else message.encode('utf-8')
                         self.metrics['messages_to_source'] += 1
                         self.metrics['bytes_to_source'] += len(msg_bytes)
-                        
+
                         await self.source_connection.send(message)
                         logger.debug(f"Forwarded message from client {client_addr} to source")
                     except Exception as e:
@@ -137,7 +137,7 @@ class SourceRelay:
         self.unix_clients.add(writer)
         peer = writer.get_extra_info('peername', 'unknown')
         logger.info(f"Unix socket client connected: {peer}")
-        
+
         # Maximum message size (10 MB)
         MAX_MESSAGE_SIZE = 10 * 1024 * 1024
 
@@ -148,14 +148,14 @@ class SourceRelay:
                 length_data = await reader.read(4)
                 if not length_data or len(length_data) < 4:
                     break
-                
+
                 msg_len = int.from_bytes(length_data, byteorder='big')
-                
+
                 # Validate message length
                 if msg_len <= 0 or msg_len > MAX_MESSAGE_SIZE:
                     logger.error(f"Invalid message length from {peer}: {msg_len}")
                     break
-                
+
                 # Read exact number of bytes for the message
                 message = b''
                 remaining = msg_len
@@ -165,19 +165,19 @@ class SourceRelay:
                         break
                     message += chunk
                     remaining -= len(chunk)
-                
+
                 # Verify we received complete message
                 if len(message) != msg_len:
                     logger.error(f"Incomplete message from {peer}: expected {msg_len}, got {len(message)}")
                     break
-                
+
                 # Forward message to source WebSocket
                 if self.source_connection:
                     try:
                         # Update metrics
                         self.metrics['messages_to_source'] += 1
                         self.metrics['bytes_to_source'] += len(message)
-                        
+
                         await self.source_connection.send(message)
                         logger.debug(f"Forwarded message from Unix client {peer} to source")
                     except Exception as e:
@@ -285,11 +285,11 @@ class SourceRelay:
         """Calculate current metrics summary"""
         now = time.time()
         uptime = now - self.metrics['start_time']
-        
+
         # Calculate messages per minute
         recent_messages = [ts for ts in self.metrics['message_timestamps'] if now - ts < 60]
         messages_per_minute = len(recent_messages)
-        
+
         # Calculate average message interval (time between consecutive messages)
         avg_latency = 0.0
         if len(self.metrics['message_timestamps']) > 1:
@@ -297,12 +297,12 @@ class SourceRelay:
             latencies = [timestamps[i] - timestamps[i-1] for i in range(1, len(timestamps))]
             if latencies:
                 avg_latency = sum(latencies) / len(latencies)
-        
+
         # Calculate source uptime
         source_uptime = 0.0
         if self.metrics['source_connected_at']:
             source_uptime = now - self.metrics['source_connected_at']
-        
+
         return {
             'uptime': uptime,
             'source_uptime': source_uptime,
@@ -401,14 +401,14 @@ class WebSocketRelay:
 
             # Validate and create a SourceRelay for each source
             performance_config = self.config.get('performance', {})
-            
+
             for source_config in sources:
                 # Validate that source has at least one endpoint
                 if not source_config.get('websocket_port') and not source_config.get('unix_socket_path'):
                     logger.error(f"Source {source_config.get('url', 'unknown')} has no endpoints configured. "
                                 f"Please specify at least one of: websocket_port, unix_socket_path")
                     continue
-                
+
                 source_relay = SourceRelay(source_config, performance_config)
                 self.source_relays.append(source_relay)
                 task = asyncio.create_task(source_relay.run())
@@ -437,71 +437,69 @@ class WebSocketRelay:
         try:
             while self.running:
                 await asyncio.sleep(60)  # Display every 60 seconds
-                
+
                 # Display metrics for all sources
                 self.display_metrics()
-                
+
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"Error in metrics display task: {e}")
-    
+
     def display_metrics(self):
         """Display current metrics for all sources in a visually appealing format"""
         if not self.source_relays:
             return
-        
+
         # Create separator line
         separator = "=" * 80
-        
+
         logger.info("")
         logger.info(separator)
         logger.info("📊 VEYLOR METRICS DASHBOARD")
         logger.info(separator)
-        
+
         for idx, relay in enumerate(self.source_relays, 1):
             metrics = relay.get_metrics_summary()
             source_url = relay.source_config.get('url', 'unknown')
-            
+
             # Format source header
-            logger.info(f"\n🔗 Source #{idx}: {source_url}")
-            logger.info("-" * 80)
-            
+            print(f"\n🔗 Source #{idx}: {source_url}")
+            print("-" * 80)
+
             # Connection status
             status_icon = "🟢" if metrics['source_connected'] else "🔴"
             status_text = "Connected" if metrics['source_connected'] else "Disconnected"
-            logger.info(f"{status_icon} Status: {status_text}")
-            
+            print(f"{status_icon} Status: {status_text}")
+
             # Uptime
             uptime_str = self._format_duration(metrics['uptime'])
-            logger.info(f"⏱️  Relay Uptime: {uptime_str}")
-            
+            print(f"⏱️  Relay Uptime: {uptime_str}")
             if metrics['source_connected']:
                 source_uptime_str = self._format_duration(metrics['source_uptime'])
-                logger.info(f"🔌 Source Connected: {source_uptime_str}")
-            
+                print(f"🔌 Source Connected: {source_uptime_str}")
+
             # Client connections
-            logger.info(f"👥 Connected Clients: {metrics['total_clients']} "
+            print(f"👥 Connected Clients: {metrics['total_clients']} "
                        f"(WebSocket: {metrics['ws_clients']}, Unix: {metrics['unix_clients']})")
-            
+
             # Message flow - Source to Clients
-            logger.info(f"\n📥 Source → Clients:")
-            logger.info(f"   Messages: {metrics['messages_from_source']:,}")
-            logger.info(f"   Data: {self._format_bytes(metrics['bytes_from_source'])}")
-            logger.info(f"   Rate: {metrics['messages_per_minute']} msg/min")
-            
+            print(f"\n📥 Source → Clients:")
+            print(f"   Messages: {metrics['messages_from_source']:,}")
+            print(f"   Data: {self._format_bytes(metrics['bytes_from_source'])}")
+            print(f"   Rate: {metrics['messages_per_minute']} msg/min")
+
             if metrics['avg_message_interval'] > 0:
-                logger.info(f"   Avg Interval: {metrics['avg_message_interval']:.3f}s")
-            
+                print(f"   Avg Interval: {metrics['avg_message_interval']:.3f}s")
+
             # Message flow - Clients to Source
-            logger.info(f"\n📤 Clients → Source:")
-            logger.info(f"   Messages: {metrics['messages_to_source']:,}")
-            logger.info(f"   Data: {self._format_bytes(metrics['bytes_to_source'])}")
-            
-        logger.info("")
-        logger.info(separator)
-        logger.info("")
-    
+            print(f"\n📤 Clients → Source:")
+            print(f"   Messages: {metrics['messages_to_source']:,}")
+            print(f"   Data: {self._format_bytes(metrics['bytes_to_source'])}")
+
+        print("")
+        print(separator)
+        print("")
     def _format_duration(self, seconds: float) -> str:
         """Format duration in human-readable format"""
         if seconds < 60:
@@ -514,7 +512,7 @@ class WebSocketRelay:
             hours = int(seconds / 3600)
             minutes = int((seconds % 3600) / 60)
             return f"{hours}h {minutes}m"
-    
+
     def _format_bytes(self, bytes_count: int) -> str:
         """Format byte count in human-readable format"""
         if bytes_count < 1024:
