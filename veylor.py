@@ -11,7 +11,9 @@ import logging
 import signal
 import sys
 import os
-from typing import Set, Optional, Dict, Any
+import time
+from typing import Set, Optional, Dict, Any, List
+from collections import deque
 import websockets
 from websockets.asyncio.server import serve as ws_serve
 from websockets.asyncio.client import connect as ws_connect
@@ -38,9 +40,27 @@ class SourceRelay:
         self.running = True
         self.source_connection = None
         self.servers = []
+        
+        # Metrics tracking
+        self.metrics = {
+            'messages_from_source': 0,
+            'messages_to_source': 0,
+            'bytes_from_source': 0,
+            'bytes_to_source': 0,
+            'message_timestamps': deque(maxlen=1000),  # Keep last 1000 message timestamps
+            'start_time': time.time(),
+            'last_message_time': None,
+            'source_connected_at': None,
+        }
 
     async def broadcast_message(self, message: bytes):
         """Broadcast message to all connected clients (non-blocking)"""
+        # Update metrics
+        self.metrics['messages_from_source'] += 1
+        self.metrics['bytes_from_source'] += len(message)
+        self.metrics['last_message_time'] = time.time()
+        self.metrics['message_timestamps'].append(time.time())
+        
         # Broadcast to WebSocket clients
         if self.ws_clients:
             # Use asyncio.gather for concurrent sending
@@ -93,6 +113,11 @@ class SourceRelay:
             async for message in websocket:
                 if self.source_connection:
                     try:
+                        # Update metrics
+                        msg_bytes = message if isinstance(message, bytes) else message.encode('utf-8')
+                        self.metrics['messages_to_source'] += 1
+                        self.metrics['bytes_to_source'] += len(msg_bytes)
+                        
                         await self.source_connection.send(message)
                         logger.debug(f"Forwarded message from client {client_addr} to source")
                     except Exception as e:
@@ -148,6 +173,10 @@ class SourceRelay:
                 # Forward message to source WebSocket
                 if self.source_connection:
                     try:
+                        # Update metrics
+                        self.metrics['messages_to_source'] += 1
+                        self.metrics['bytes_to_source'] += len(message)
+                        
                         await self.source_connection.send(message)
                         logger.debug(f"Forwarded message from Unix client {peer} to source")
                     except Exception as e:
@@ -188,6 +217,7 @@ class SourceRelay:
                 logger.info(f"Connecting to source: {url}")
                 async with ws_connect(url, additional_headers=headers) as websocket:
                     self.source_connection = websocket
+                    self.metrics['source_connected_at'] = time.time()
                     logger.info(f"Connected to source: {url}")
                     attempt = 0  # Reset attempt counter on successful connection
 
@@ -249,6 +279,43 @@ class SourceRelay:
         except Exception as e:
             logger.error(f"Failed to start Unix socket server on {socket_path}: {e}")
             raise
+
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        """Calculate current metrics summary"""
+        now = time.time()
+        uptime = now - self.metrics['start_time']
+        
+        # Calculate messages per minute
+        recent_messages = [ts for ts in self.metrics['message_timestamps'] if now - ts < 60]
+        messages_per_minute = len(recent_messages)
+        
+        # Calculate average latency (time between messages)
+        avg_latency = 0.0
+        if len(self.metrics['message_timestamps']) > 1:
+            timestamps = list(self.metrics['message_timestamps'])
+            latencies = [timestamps[i] - timestamps[i-1] for i in range(1, len(timestamps))]
+            if latencies:
+                avg_latency = sum(latencies) / len(latencies)
+        
+        # Calculate source uptime
+        source_uptime = 0.0
+        if self.metrics['source_connected_at']:
+            source_uptime = now - self.metrics['source_connected_at']
+        
+        return {
+            'uptime': uptime,
+            'source_uptime': source_uptime,
+            'source_connected': self.source_connection is not None,
+            'ws_clients': len(self.ws_clients),
+            'unix_clients': len(self.unix_clients),
+            'total_clients': len(self.ws_clients) + len(self.unix_clients),
+            'messages_from_source': self.metrics['messages_from_source'],
+            'messages_to_source': self.metrics['messages_to_source'],
+            'bytes_from_source': self.metrics['bytes_from_source'],
+            'bytes_to_source': self.metrics['bytes_to_source'],
+            'messages_per_minute': messages_per_minute,
+            'avg_message_interval': avg_latency,
+        }
 
     async def run(self):
         """Run this source relay"""
@@ -320,6 +387,7 @@ class WebSocketRelay:
         self.source_relays = []
         self.source_tasks = []
         self.running = True
+        self.metrics_task = None
 
     async def run(self):
         """Run the relay service"""
@@ -350,6 +418,9 @@ class WebSocketRelay:
                 logger.error("No valid sources configured. Exiting.")
                 return
 
+            # Start metrics display task
+            self.metrics_task = asyncio.create_task(self.display_metrics_periodically())
+
             # Wait for all source relays to complete
             await asyncio.gather(*self.source_tasks)
 
@@ -360,10 +431,111 @@ class WebSocketRelay:
         finally:
             await self.shutdown()
 
+    async def display_metrics_periodically(self):
+        """Display metrics for all sources periodically"""
+        try:
+            while self.running:
+                await asyncio.sleep(60)  # Display every 60 seconds
+                
+                if not self.running:
+                    break
+                
+                # Display metrics for all sources
+                self.display_metrics()
+                
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Error in metrics display task: {e}")
+    
+    def display_metrics(self):
+        """Display current metrics for all sources in a visually appealing format"""
+        if not self.source_relays:
+            return
+        
+        # Create separator line
+        separator = "=" * 80
+        
+        logger.info("")
+        logger.info(separator)
+        logger.info("📊 VEYLOR METRICS DASHBOARD")
+        logger.info(separator)
+        
+        for idx, relay in enumerate(self.source_relays, 1):
+            metrics = relay.get_metrics_summary()
+            source_url = relay.source_config.get('url', 'unknown')
+            
+            # Format source header
+            logger.info(f"\n🔗 Source #{idx}: {source_url}")
+            logger.info("-" * 80)
+            
+            # Connection status
+            status_icon = "🟢" if metrics['source_connected'] else "🔴"
+            status_text = "Connected" if metrics['source_connected'] else "Disconnected"
+            logger.info(f"{status_icon} Status: {status_text}")
+            
+            # Uptime
+            uptime_str = self._format_duration(metrics['uptime'])
+            logger.info(f"⏱️  Relay Uptime: {uptime_str}")
+            
+            if metrics['source_connected']:
+                source_uptime_str = self._format_duration(metrics['source_uptime'])
+                logger.info(f"🔌 Source Connected: {source_uptime_str}")
+            
+            # Client connections
+            logger.info(f"👥 Connected Clients: {metrics['total_clients']} "
+                       f"(WebSocket: {metrics['ws_clients']}, Unix: {metrics['unix_clients']})")
+            
+            # Message flow - Source to Clients
+            logger.info(f"\n📥 Source → Clients:")
+            logger.info(f"   Messages: {metrics['messages_from_source']:,}")
+            logger.info(f"   Data: {self._format_bytes(metrics['bytes_from_source'])}")
+            logger.info(f"   Rate: {metrics['messages_per_minute']} msg/min")
+            
+            if metrics['avg_message_interval'] > 0:
+                logger.info(f"   Avg Interval: {metrics['avg_message_interval']:.3f}s")
+            
+            # Message flow - Clients to Source
+            logger.info(f"\n📤 Clients → Source:")
+            logger.info(f"   Messages: {metrics['messages_to_source']:,}")
+            logger.info(f"   Data: {self._format_bytes(metrics['bytes_to_source'])}")
+            
+        logger.info("")
+        logger.info(separator)
+        logger.info("")
+    
+    def _format_duration(self, seconds: float) -> str:
+        """Format duration in human-readable format"""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            minutes = int(seconds / 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs}s"
+        else:
+            hours = int(seconds / 3600)
+            minutes = int((seconds % 3600) / 60)
+            return f"{hours}h {minutes}m"
+    
+    def _format_bytes(self, bytes_count: int) -> str:
+        """Format byte count in human-readable format"""
+        if bytes_count < 1024:
+            return f"{bytes_count} B"
+        elif bytes_count < 1024 * 1024:
+            return f"{bytes_count / 1024:.2f} KB"
+        elif bytes_count < 1024 * 1024 * 1024:
+            return f"{bytes_count / (1024 * 1024):.2f} MB"
+        else:
+            return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
+
     async def shutdown(self):
         """Graceful shutdown"""
         logger.info("Shutting down all source relays...")
         self.running = False
+
+        # Cancel metrics display task
+        if self.metrics_task and not self.metrics_task.done():
+            self.metrics_task.cancel()
 
         # First, set all source relays to stop running
         for source_relay in self.source_relays:
