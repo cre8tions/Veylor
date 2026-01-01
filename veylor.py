@@ -438,9 +438,6 @@ class WebSocketRelay:
             while self.running:
                 await asyncio.sleep(60)  # Display every 60 seconds
                 
-                if not self.running:
-                    break
-                
                 # Display metrics for all sources
                 self.display_metrics()
                 
