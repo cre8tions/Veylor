@@ -56,10 +56,11 @@ class SourceRelay:
     async def broadcast_message(self, message: bytes):
         """Broadcast message to all connected clients (non-blocking)"""
         # Update metrics
+        now = time.time()
         self.metrics['messages_from_source'] += 1
         self.metrics['bytes_from_source'] += len(message)
-        self.metrics['last_message_time'] = time.time()
-        self.metrics['message_timestamps'].append(time.time())
+        self.metrics['last_message_time'] = now
+        self.metrics['message_timestamps'].append(now)
         
         # Broadcast to WebSocket clients
         if self.ws_clients:
@@ -289,7 +290,7 @@ class SourceRelay:
         recent_messages = [ts for ts in self.metrics['message_timestamps'] if now - ts < 60]
         messages_per_minute = len(recent_messages)
         
-        # Calculate average latency (time between messages)
+        # Calculate average message interval (time between consecutive messages)
         avg_latency = 0.0
         if len(self.metrics['message_timestamps']) > 1:
             timestamps = list(self.metrics['message_timestamps'])
