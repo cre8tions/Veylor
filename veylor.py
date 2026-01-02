@@ -12,6 +12,7 @@ import signal
 import sys
 import os
 import time
+import uvloop
 from typing import Set, Optional, Dict, Any, List
 from collections import deque
 import websockets
@@ -567,6 +568,8 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 async def main(config_path: str):
     """Main entry point"""
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    
     config = load_config(config_path)
     relay = WebSocketRelay(config)
 
@@ -604,7 +607,7 @@ if __name__ == '__main__':
         logger.setLevel(logging.DEBUG)
 
     try:
-        asyncio.run(main(args.config))
+        uvloop.run(main(args.config))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:
