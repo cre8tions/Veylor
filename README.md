@@ -262,3 +262,8 @@ See LICENSE file for details.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Changelog
+
+- 1.0.0
+  - Iinitial release
