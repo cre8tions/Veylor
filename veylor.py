@@ -575,21 +575,58 @@ async def main(config_path: str):
 
     # Setup signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
 
     def signal_handler():
         logger.info("Received shutdown signal")
-        # Set running flag to false
-        relay.running = False
-        # Close all source connections to break receive loops
-        for source_relay in relay.source_relays:
-            source_relay.running = False
-            if source_relay.source_connection:
-                asyncio.create_task(source_relay.source_connection.close())
+        shutdown_event.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    await relay.run()
+    # Run relay and wait for shutdown signal
+    relay_task = asyncio.create_task(relay.run())
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+
+    # Wait for either relay to complete or shutdown signal
+    done, pending = await asyncio.wait(
+        {relay_task, shutdown_task},
+        return_when=asyncio.FIRST_COMPLETED
+    )
+
+    # If shutdown was signaled, trigger shutdown and wait
+    if shutdown_event.is_set():
+        logger.info("Initiating graceful shutdown...")
+        relay.running = False
+        
+        # Close all source connections to break receive loops
+        for source_relay in relay.source_relays:
+            source_relay.running = False
+            if source_relay.source_connection:
+                try:
+                    await source_relay.source_connection.close()
+                except Exception:
+                    pass
+        
+        # Wait for relay to finish shutting down (with timeout)
+        if not relay_task.done():
+            try:
+                await asyncio.wait_for(relay_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Relay shutdown timed out, forcing cancellation")
+                relay_task.cancel()
+                try:
+                    await relay_task
+                except asyncio.CancelledError:
+                    pass
+
+    # Cancel any remaining tasks
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == '__main__':
