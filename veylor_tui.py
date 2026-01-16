@@ -17,29 +17,29 @@ from textual.reactive import reactive
 
 class MetricCard(Static):
     """A card widget for displaying a single metric"""
-    
+
     value = reactive("")
     label = reactive("")
-    
+
     def __init__(self, label: str, value: str = "0", **kwargs):
         super().__init__(**kwargs)
         self.label = label
         self.value = value
-    
+
     def render(self) -> str:
         return f"[bold cyan]{self.label}[/]\n[yellow]{self.value}[/]"
 
 
 class ConnectionStatus(Static):
     """Widget for displaying connection status"""
-    
+
     status = reactive("🔴 Disconnected")
     url = reactive("")
     uptime = reactive("0s")
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-    
+
     def render(self) -> str:
         return f"""{self.status}
 [dim]URL:[/] {self.url}
@@ -48,30 +48,30 @@ class ConnectionStatus(Static):
 
 class SourceMetricsPanel(Static):
     """Panel displaying metrics for a single source"""
-    
+
     def __init__(self, source_idx: int, **kwargs):
         super().__init__(**kwargs)
         self.source_idx = source_idx
         self.border_title = f"Source #{source_idx}"
         self.border_subtitle = ""
-    
+
     def compose(self) -> ComposeResult:
         # Compact vertical layout for each source
         yield ConnectionStatus(id=f"conn-status-{self.source_idx}")
-        
+
         with Horizontal(classes="compact-row"):
             yield MetricCard("Clients", "0", id=f"clients-{self.source_idx}")
             yield MetricCard("WS", "0", id=f"ws-clients-{self.source_idx}")
             yield MetricCard("Unix", "0", id=f"unix-clients-{self.source_idx}")
-        
+
         with Horizontal(classes="compact-row"):
             yield MetricCard("Msg In", "0", id=f"msg-from-{self.source_idx}")
             yield MetricCard("Msg Out", "0", id=f"msg-to-{self.source_idx}")
-        
+
         with Horizontal(classes="compact-row"):
             yield MetricCard("Data In", "0 B", id=f"data-from-{self.source_idx}")
             yield MetricCard("Data Out", "0 B", id=f"data-to-{self.source_idx}")
-        
+
         with Horizontal(classes="compact-row"):
             yield MetricCard("Rate", "0", id=f"msg-rate-{self.source_idx}")
             yield MetricCard("Interval", "0.000s", id=f"avg-interval-{self.source_idx}")
@@ -79,43 +79,43 @@ class SourceMetricsPanel(Static):
 
 class VeylorTUI(App):
     """Veylor Terminal User Interface Application"""
-    
+
     CSS = """
     Screen {
         background: $surface;
         layout: vertical;
     }
-    
+
     Header {
         background: $primary;
         color: $text;
         height: auto;
     }
-    
+
     Footer {
         background: $primary-darken-2;
         height: auto;
     }
-    
+
     #metrics-container {
         height: auto;
         max-height: 60vh;
         overflow-y: auto;
         padding: 0 1;
     }
-    
+
     #sources-grid {
         layout: grid;
         grid-size: 3;
         grid-gutter: 1;
         padding: 1 0;
     }
-    
+
     .compact-row {
         height: auto;
         margin-bottom: 0;
     }
-    
+
     MetricCard {
         border: solid $primary;
         padding: 0 1;
@@ -123,7 +123,7 @@ class VeylorTUI(App):
         height: 4;
         min-width: 8;
     }
-    
+
     ConnectionStatus {
         border: solid $success;
         padding: 0 1;
@@ -131,84 +131,85 @@ class VeylorTUI(App):
         width: 100%;
         margin-bottom: 1;
     }
-    
+
     SourceMetricsPanel {
-        border: double $accent;
+        border: panel $accent;
         padding: 1;
         height: auto;
         max-height: 30;
     }
-    
+
     #log-container {
         height: 10;
         border: thick $warning;
         margin: 1;
+        dock: bottom;
     }
-    
+
     Log {
         background: $surface-darken-1;
     }
     """
-    
+
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("d", "toggle_dark", "Toggle Dark Mode"),
         ("c", "clear_logs", "Clear Logs"),
     ]
-    
+
     def __init__(self, relay_instance=None, **kwargs):
         super().__init__(**kwargs)
         self.relay_instance = relay_instance
         self.update_task = None
-        
+
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Header(show_clock=True)
-        
+
         with Container(id="metrics-container"):
             with Container(id="sources-grid"):
                 # Source panels will be added dynamically in a grid
                 pass
-        
+
         with Container(id="log-container"):
             yield Log(id="log-viewer", auto_scroll=True)
-        
+
         yield Footer()
-    
+
     def on_mount(self) -> None:
         """Called when app is mounted."""
         self.title = "Veylor WebSocket Relay Dashboard"
         self.sub_title = "High-Performance Message Broadcasting"
-        
+
         # Initialize source panels if relay instance is available
         if self.relay_instance:
             self._initialize_source_panels()
-        
+
         # Start periodic update task
         self.update_task = self.set_interval(0.5, self._update_metrics)
-        
+
         # Display welcome message
         log_widget = self.query_one("#log-viewer", Log)
         log_widget.write_line("[bold green]Veylor TUI started[/]")
         log_widget.write_line("[dim]Press 'q' to quit, 'c' to clear logs, 'd' to toggle dark mode[/]")
-    
+
     def _initialize_source_panels(self) -> None:
         """Initialize metric panels for each source"""
         container = self.query_one("#sources-grid")
-        
+
         for idx, source_relay in enumerate(self.relay_instance.source_relays, 1):
             panel = SourceMetricsPanel(idx)
             container.mount(panel)
-    
+
     def _update_metrics(self) -> None:
         """Update metrics display from relay instance"""
         if not self.relay_instance:
             return
-        
+
         for idx, source_relay in enumerate(self.relay_instance.source_relays, 1):
             metrics = source_relay.get_metrics_summary()
             source_url = source_relay.source_config.get('url', 'unknown')
-            
+
             # Update connection status
             try:
                 conn_status = self.query_one(f"#conn-status-{idx}", ConnectionStatus)
@@ -220,7 +221,7 @@ class VeylorTUI(App):
                 conn_status.uptime = self._format_duration(metrics['source_uptime']) if metrics['source_connected'] else "N/A"
             except (LookupError, AttributeError):
                 pass
-            
+
             # Update metric cards
             try:
                 self.query_one(f"#clients-{idx}", MetricCard).value = str(metrics['total_clients'])
@@ -234,7 +235,7 @@ class VeylorTUI(App):
                 self.query_one(f"#avg-interval-{idx}", MetricCard).value = f"{metrics['avg_message_interval']:.3f}s"
             except (LookupError, AttributeError):
                 pass
-    
+
     def _format_duration(self, seconds: float) -> str:
         """Format duration in human-readable format"""
         if seconds < 60:
@@ -247,7 +248,7 @@ class VeylorTUI(App):
             hours = int(seconds / 3600)
             minutes = int((seconds % 3600) / 60)
             return f"{hours}h {minutes}m"
-    
+
     def _format_bytes(self, bytes_count: int) -> str:
         """Format byte count in human-readable format"""
         if bytes_count < 1024:
@@ -258,23 +259,23 @@ class VeylorTUI(App):
             return f"{bytes_count / (1024 * 1024):.2f} MB"
         else:
             return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
-    
+
     def action_toggle_dark(self) -> None:
         """Toggle dark mode."""
         self.theme = "textual-light" if self.theme == "textual-dark" else "textual-dark"
-    
+
     def action_clear_logs(self) -> None:
         """Clear the log viewer."""
         log_widget = self.query_one("#log-viewer", Log)
         log_widget.clear()
         log_widget.write_line("[dim]Logs cleared[/]")
-    
+
     def write_log(self, message: str, level: str = "INFO") -> None:
         """Write a log message to the log viewer"""
         try:
             log_widget = self.query_one("#log-viewer", Log)
             timestamp = datetime.now().strftime("%H:%M:%S")
-            
+
             # Color code by level
             if level == "ERROR":
                 color = "red"
@@ -284,13 +285,13 @@ class VeylorTUI(App):
                 color = "dim"
             else:
                 color = "white"
-            
+
             formatted_msg = f"[dim]{timestamp}[/] [{color}]{level:8}[/] {message}"
             log_widget.write_line(formatted_msg)
         except (LookupError, AttributeError):
             # Silently ignore if TUI widgets are not ready yet
             pass
-    
+
     def on_unmount(self) -> None:
         """Called when app is unmounted."""
         if self.update_task:
@@ -299,15 +300,15 @@ class VeylorTUI(App):
 
 class TUILogHandler:
     """Log handler that routes logs to the TUI"""
-    
+
     def __init__(self, tui_app: VeylorTUI):
         self.tui_app = tui_app
-    
+
     def write(self, message: str, level: str = "INFO"):
         """Write a log message to the TUI"""
         if self.tui_app:
             self.tui_app.write_log(message, level)
-    
+
     def flush(self):
         """Flush is a no-op for TUI"""
         pass
