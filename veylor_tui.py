@@ -200,10 +200,8 @@ class VeylorTUI(App):
                 conn_status = self.query_one(f"#conn-status-{idx}", ConnectionStatus)
                 if metrics['source_connected']:
                     conn_status.status = "🟢 Connected"
-                    conn_status.border_subtitle = "green"
                 else:
                     conn_status.status = "🔴 Disconnected"
-                    conn_status.border_subtitle = "red"
                 conn_status.url = source_url[:40] + "..." if len(source_url) > 40 else source_url
                 conn_status.uptime = self._format_duration(metrics['source_uptime']) if metrics['source_connected'] else "N/A"
             except Exception:
