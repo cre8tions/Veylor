@@ -41,10 +41,9 @@ class ConnectionStatus(Static):
         super().__init__(**kwargs)
     
     def render(self) -> str:
-        return f"""[bold]Connection Status[/]
-{self.status}
+        return f"""{self.status}
 [dim]URL:[/] {self.url}
-[dim]Uptime:[/] {self.uptime}"""
+[dim]Up:[/] {self.uptime}"""
 
 
 class SourceMetricsPanel(Static):
@@ -57,21 +56,25 @@ class SourceMetricsPanel(Static):
         self.border_subtitle = ""
     
     def compose(self) -> ComposeResult:
-        with Horizontal(classes="metrics-row"):
-            yield ConnectionStatus(id=f"conn-status-{self.source_idx}")
-            yield MetricCard("Total Clients", "0", id=f"clients-{self.source_idx}")
-            yield MetricCard("WS Clients", "0", id=f"ws-clients-{self.source_idx}")
-            yield MetricCard("Unix Clients", "0", id=f"unix-clients-{self.source_idx}")
+        # Compact vertical layout for each source
+        yield ConnectionStatus(id=f"conn-status-{self.source_idx}")
         
-        with Horizontal(classes="metrics-row"):
-            yield MetricCard("Messages from Source", "0", id=f"msg-from-{self.source_idx}")
-            yield MetricCard("Messages to Source", "0", id=f"msg-to-{self.source_idx}")
-            yield MetricCard("Data from Source", "0 B", id=f"data-from-{self.source_idx}")
-            yield MetricCard("Data to Source", "0 B", id=f"data-to-{self.source_idx}")
+        with Horizontal(classes="compact-row"):
+            yield MetricCard("Clients", "0", id=f"clients-{self.source_idx}")
+            yield MetricCard("WS", "0", id=f"ws-clients-{self.source_idx}")
+            yield MetricCard("Unix", "0", id=f"unix-clients-{self.source_idx}")
         
-        with Horizontal(classes="metrics-row"):
-            yield MetricCard("Messages/min", "0", id=f"msg-rate-{self.source_idx}")
-            yield MetricCard("Avg Interval", "0.000s", id=f"avg-interval-{self.source_idx}")
+        with Horizontal(classes="compact-row"):
+            yield MetricCard("Msg In", "0", id=f"msg-from-{self.source_idx}")
+            yield MetricCard("Msg Out", "0", id=f"msg-to-{self.source_idx}")
+        
+        with Horizontal(classes="compact-row"):
+            yield MetricCard("Data In", "0 B", id=f"data-from-{self.source_idx}")
+            yield MetricCard("Data Out", "0 B", id=f"data-to-{self.source_idx}")
+        
+        with Horizontal(classes="compact-row"):
+            yield MetricCard("Rate", "0", id=f"msg-rate-{self.source_idx}")
+            yield MetricCard("Interval", "0.000s", id=f"avg-interval-{self.source_idx}")
 
 
 class VeylorTUI(App):
@@ -80,6 +83,7 @@ class VeylorTUI(App):
     CSS = """
     Screen {
         background: $surface;
+        overflow-y: auto;
     }
     
     Header {
@@ -93,41 +97,50 @@ class VeylorTUI(App):
     
     #metrics-container {
         height: auto;
-        padding: 1;
+        max-height: 60vh;
+        overflow-y: auto;
+        padding: 0 1;
     }
     
-    .metrics-row {
+    #sources-grid {
+        layout: grid;
+        grid-size: 3;
+        grid-gutter: 1;
+        padding: 1 0;
+    }
+    
+    .compact-row {
         height: auto;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
     
     MetricCard {
         border: solid $primary;
-        padding: 1;
+        padding: 0 1;
         margin-right: 1;
-        height: auto;
-        min-width: 20;
+        height: 3;
+        min-width: 8;
     }
     
     ConnectionStatus {
         border: solid $success;
-        padding: 1;
-        margin-right: 1;
-        height: auto;
-        min-width: 30;
+        padding: 0 1;
+        height: 4;
+        width: 100%;
+        margin-bottom: 1;
     }
     
     SourceMetricsPanel {
         border: double $accent;
         padding: 1;
-        margin-bottom: 1;
         height: auto;
+        max-height: 30;
     }
     
     #log-container {
-        height: 15;
+        height: 10;
         border: thick $warning;
-        margin-top: 1;
+        margin: 1;
     }
     
     Log {
@@ -151,8 +164,9 @@ class VeylorTUI(App):
         yield Header(show_clock=True)
         
         with Container(id="metrics-container"):
-            # Source panels will be added dynamically
-            pass
+            with Container(id="sources-grid"):
+                # Source panels will be added dynamically in a grid
+                pass
         
         with Container(id="log-container"):
             yield Log(id="log-viewer", auto_scroll=True)
@@ -178,7 +192,7 @@ class VeylorTUI(App):
     
     def _initialize_source_panels(self) -> None:
         """Initialize metric panels for each source"""
-        container = self.query_one("#metrics-container")
+        container = self.query_one("#sources-grid")
         
         for idx, source_relay in enumerate(self.relay_instance.source_relays, 1):
             panel = SourceMetricsPanel(idx)
