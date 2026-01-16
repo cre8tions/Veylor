@@ -6,15 +6,13 @@ Provides an attractive, real-time dashboard for monitoring relay metrics,
 connections, and logs without impacting WebSocket processing performance.
 """
 
-import asyncio
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, Log
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
-from textual import events
 
 
 class MetricCard(Static):
