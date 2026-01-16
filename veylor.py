@@ -578,7 +578,13 @@ async def main(config_path: str):
 
     def signal_handler():
         logger.info("Received shutdown signal")
+        # Set running flag to false
         relay.running = False
+        # Close all source connections to break receive loops
+        for source_relay in relay.source_relays:
+            source_relay.running = False
+            if source_relay.source_connection:
+                asyncio.create_task(source_relay.source_connection.close())
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
