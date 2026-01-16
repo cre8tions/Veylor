@@ -202,7 +202,7 @@ class VeylorTUI(App):
                     conn_status.status = "🔴 Disconnected"
                 conn_status.url = source_url[:40] + "..." if len(source_url) > 40 else source_url
                 conn_status.uptime = self._format_duration(metrics['source_uptime']) if metrics['source_connected'] else "N/A"
-            except Exception:
+            except (LookupError, AttributeError):
                 pass
             
             # Update metric cards
@@ -216,7 +216,7 @@ class VeylorTUI(App):
                 self.query_one(f"#data-to-{idx}", MetricCard).value = self._format_bytes(metrics['bytes_to_source'])
                 self.query_one(f"#msg-rate-{idx}", MetricCard).value = str(metrics['messages_per_minute'])
                 self.query_one(f"#avg-interval-{idx}", MetricCard).value = f"{metrics['avg_message_interval']:.3f}s"
-            except Exception:
+            except (LookupError, AttributeError):
                 pass
     
     def _format_duration(self, seconds: float) -> str:
@@ -271,8 +271,8 @@ class VeylorTUI(App):
             
             formatted_msg = f"[dim]{timestamp}[/] [{color}]{level:8}[/] {message}"
             log_widget.write_line(formatted_msg)
-        except Exception:
-            # Silently ignore if TUI is not ready yet
+        except (LookupError, AttributeError):
+            # Silently ignore if TUI widgets are not ready yet
             pass
     
     def on_unmount(self) -> None:
