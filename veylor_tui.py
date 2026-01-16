@@ -9,10 +9,9 @@ connections, and logs without impacting WebSocket processing performance.
 import asyncio
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from collections import deque
 
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Static, DataTable, Log
+from textual.widgets import Header, Footer, Static, Log
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual import events
@@ -148,7 +147,6 @@ class VeylorTUI(App):
         super().__init__(**kwargs)
         self.relay_instance = relay_instance
         self.update_task = None
-        self.log_queue = deque(maxlen=1000)
         
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -278,8 +276,8 @@ class VeylorTUI(App):
             formatted_msg = f"[dim]{timestamp}[/] [{color}]{level:8}[/] {message}"
             log_widget.write_line(formatted_msg)
         except Exception:
-            # If TUI is not ready yet, queue the message
-            self.log_queue.append((message, level))
+            # Silently ignore if TUI is not ready yet
+            pass
     
     def on_unmount(self) -> None:
         """Called when app is unmounted."""
