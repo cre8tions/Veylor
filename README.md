@@ -14,6 +14,7 @@ Veylor is a fast, efficient, non-blocking Python application that connects to re
   - Unix domain sockets for local IPC
 - **Automatic reconnection**: Configurable reconnection logic for source connections
 - **Concurrent message delivery**: Messages are broadcast to all clients concurrently
+- **Terminal UI (TUI)**: Optional real-time dashboard for monitoring metrics and logs
 - **Production-ready**: Proper error handling, logging, and graceful shutdown
 
 ## Installation
@@ -80,7 +81,38 @@ python veylor.py -c /path/to/config.yaml
 
 # Run with verbose logging
 python veylor.py -v
+
+# Run with Terminal UI (TUI) mode
+python veylor.py --tui
+
+# Combine options
+python veylor.py -c /path/to/config.yaml --tui -v
 ```
+
+### Terminal UI (TUI) Mode
+
+Veylor includes an optional Terminal User Interface for real-time monitoring:
+
+```bash
+python veylor.py --tui
+```
+
+**Features:**
+- **Real-time metrics dashboard** updated every 500ms
+- **Connection status** with visual indicators (🟢 connected, 🔴 disconnected)
+- **Live metric cards** showing:
+  - Client connections (WebSocket and Unix socket)
+  - Message counts (from/to source)
+  - Data transfer statistics
+  - Messages per minute
+  - Average message intervals
+- **Full-width log viewer** with color-coded log levels
+- **Keyboard shortcuts**:
+  - `q` - Quit the application
+  - `d` - Toggle dark/light mode
+  - `c` - Clear logs
+
+The TUI runs without impacting WebSocket processing performance, updating metrics asynchronously in the background.
 
 ### Connect as a WebSocket Client
 
@@ -202,7 +234,7 @@ Veylor uses a fully asynchronous architecture with per-source isolation and bidi
 ## Command Line Options
 
 ```
-usage: veylor.py [-h] [-c CONFIG] [-v]
+usage: veylor.py [-h] [-c CONFIG] [-v] [--tui]
 
 Veylor - High-performance WebSocket relay
 
@@ -211,6 +243,7 @@ optional arguments:
   -c CONFIG, --config CONFIG
                         Path to configuration file (default: config.yaml)
   -v, --verbose         Enable verbose logging
+  --tui                 Enable Terminal UI mode
 ```
 
 ## Signal Handling
@@ -230,8 +263,9 @@ On shutdown, Veylor will:
 
 - Python 3.7+
 - websockets >= 12.0
-- aiohttp >= 3.9.0
 - PyYAML >= 6.0
+- uvloop >= 0.19.0
+- textual >= 0.47.0 (optional, for TUI mode)
 
 ## License
 
