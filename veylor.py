@@ -21,6 +21,13 @@ from websockets.asyncio.client import connect as ws_connect
 import yaml
 import argparse
 
+# TUI support (imported conditionally)
+try:
+    from veylor_tui import VeylorTUI, TUILogHandler
+    TUI_AVAILABLE = True
+except ImportError:
+    TUI_AVAILABLE = False
+
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +35,23 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger('veylor')
+
+
+class TUILoggingHandler(logging.Handler):
+    """Custom logging handler that routes logs to the TUI"""
+    
+    def __init__(self, tui_handler):
+        super().__init__()
+        self.tui_handler = tui_handler
+    
+    def emit(self, record):
+        try:
+            # Get just the message without timestamp/level
+            msg = record.getMessage()
+            self.tui_handler.write(msg, record.levelname)
+        except Exception:
+            self.handleError(record)
+
 
 
 class SourceRelay:
@@ -566,7 +590,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-async def main(config_path: str):
+async def main(config_path: str, use_tui: bool = False):
     """Main entry point"""
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     
@@ -583,7 +607,42 @@ async def main(config_path: str):
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    await relay.run()
+    if use_tui and TUI_AVAILABLE:
+        # Run with TUI
+        app = VeylorTUI(relay_instance=relay)
+        
+        # Create TUI log handler
+        tui_handler = TUILogHandler(app)
+        tui_logging_handler = TUILoggingHandler(tui_handler)
+        logger.addHandler(tui_logging_handler)
+        
+        # Suppress console output when using TUI
+        logging.getLogger('veylor').handlers = [tui_logging_handler]
+        
+        # Run relay and TUI concurrently
+        relay_task = asyncio.create_task(relay.run())
+        
+        try:
+            await app.run_async()
+        except Exception as e:
+            logger.error(f"TUI error: {e}")
+        finally:
+            # Shutdown relay when TUI exits
+            relay.running = False
+            await relay.shutdown()
+            if not relay_task.done():
+                relay_task.cancel()
+                try:
+                    await relay_task
+                except asyncio.CancelledError:
+                    pass
+    elif use_tui and not TUI_AVAILABLE:
+        logger.error("TUI mode requested but textual is not installed. Install with: pip install textual")
+        sys.exit(1)
+    else:
+        # Run without TUI (original behavior)
+        await relay.run()
+
 
 
 if __name__ == '__main__':
@@ -600,6 +659,11 @@ if __name__ == '__main__':
         action='store_true',
         help='Enable verbose logging'
     )
+    parser.add_argument(
+        '--tui',
+        action='store_true',
+        help='Enable Terminal UI mode'
+    )
 
     args = parser.parse_args()
 
@@ -607,7 +671,7 @@ if __name__ == '__main__':
         logger.setLevel(logging.DEBUG)
 
     try:
-        uvloop.run(main(args.config))
+        uvloop.run(main(args.config, use_tui=args.tui))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:
