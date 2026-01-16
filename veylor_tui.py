@@ -301,13 +301,3 @@ class TUILogHandler:
     def flush(self):
         """Flush is a no-op for TUI"""
         pass
-
-
-async def run_tui_with_relay(relay_instance) -> None:
-    """Run the TUI alongside the relay service"""
-    app = VeylorTUI(relay_instance=relay_instance)
-    
-    # Create a task to run the TUI
-    async with app.run_test() as pilot:
-        # This will run until the app is closed
-        await pilot.app.run_async()
