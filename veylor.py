@@ -39,11 +39,11 @@ logger = logging.getLogger('veylor')
 
 class TUILoggingHandler(logging.Handler):
     """Custom logging handler that routes logs to the TUI"""
-    
+
     def __init__(self, tui_handler):
         super().__init__()
         self.tui_handler = tui_handler
-    
+
     def emit(self, record):
         try:
             # Get just the message without timestamp/level
@@ -593,16 +593,17 @@ def load_config(config_path: str) -> Dict[str, Any]:
 async def main(config_path: str, use_tui: bool = False):
     """Main entry point"""
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    
+
     config = load_config(config_path)
     relay = WebSocketRelay(config)
 
     # Setup signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
 
     def signal_handler():
         logger.info("Received shutdown signal")
-        relay.running = False
+        shutdown_event.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
@@ -610,26 +611,26 @@ async def main(config_path: str, use_tui: bool = False):
     if use_tui and TUI_AVAILABLE:
         # Run with TUI
         app = VeylorTUI(relay_instance=relay)
-        
+
         # Create TUI log handler
         tui_handler = TUILogHandler(app)
         tui_logging_handler = TUILoggingHandler(tui_handler)
-        
+
         # Remove console handlers and add TUI handler for veylor logger
         veylor_logger = logging.getLogger('veylor')
         for handler in veylor_logger.handlers[:]:
             veylor_logger.removeHandler(handler)
         veylor_logger.addHandler(tui_logging_handler)
-        
+
         # Also suppress root logger to prevent stdout output
         root_logger = logging.getLogger()
         for handler in root_logger.handlers[:]:
             if isinstance(handler, logging.StreamHandler):
                 root_logger.removeHandler(handler)
-        
+
         # Run relay and TUI concurrently
         relay_task = asyncio.create_task(relay.run())
-        
+
         try:
             await app.run_async()
         except Exception as e:
@@ -649,7 +650,49 @@ async def main(config_path: str, use_tui: bool = False):
         sys.exit(1)
     else:
         # Run without TUI (original behavior)
-        await relay.run()
+        # Run relay and wait for shutdown signal
+        relay_task = asyncio.create_task(relay.run())
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+
+        # Wait for either relay to complete or shutdown signal
+        done, pending = await asyncio.wait(
+            {relay_task, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED
+    )
+
+    # If shutdown was signaled, trigger shutdown and wait
+    if shutdown_event.is_set():
+        logger.info("Initiating graceful shutdown...")
+        relay.running = False
+
+        # Close all source connections to break receive loops
+        for source_relay in relay.source_relays:
+            source_relay.running = False
+            if source_relay.source_connection:
+                try:
+                    await source_relay.source_connection.close()
+                except Exception:
+                    pass
+
+        # Wait for relay to finish shutting down (with timeout)
+        if not relay_task.done():
+            try:
+                await asyncio.wait_for(relay_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Relay shutdown timed out, forcing cancellation")
+                relay_task.cancel()
+                try:
+                    await relay_task
+                except asyncio.CancelledError:
+                    pass
+
+    # Cancel any remaining tasks
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 
