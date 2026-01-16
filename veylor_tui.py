@@ -120,7 +120,7 @@ class VeylorTUI(App):
         border: solid $primary;
         padding: 0 1;
         margin-right: 1;
-        height: 3;
+        height: 4;
         min-width: 8;
     }
     

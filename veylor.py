@@ -621,6 +621,12 @@ async def main(config_path: str, use_tui: bool = False):
             veylor_logger.removeHandler(handler)
         veylor_logger.addHandler(tui_logging_handler)
         
+        # Also suppress root logger to prevent stdout output
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            if isinstance(handler, logging.StreamHandler):
+                root_logger.removeHandler(handler)
+        
         # Run relay and TUI concurrently
         relay_task = asyncio.create_task(relay.run())
         
