@@ -83,16 +83,18 @@ class VeylorTUI(App):
     CSS = """
     Screen {
         background: $surface;
-        overflow-y: auto;
+        layout: vertical;
     }
     
     Header {
         background: $primary;
         color: $text;
+        height: auto;
     }
     
     Footer {
         background: $primary-darken-2;
+        height: auto;
     }
     
     #metrics-container {
@@ -259,7 +261,7 @@ class VeylorTUI(App):
     
     def action_toggle_dark(self) -> None:
         """Toggle dark mode."""
-        self.dark = not self.dark
+        self.theme = "textual-light" if self.theme == "textual-dark" else "textual-dark"
     
     def action_clear_logs(self) -> None:
         """Clear the log viewer."""
