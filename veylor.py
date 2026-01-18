@@ -306,6 +306,31 @@ class SourceRelay:
             logger.error(f"Failed to start Unix socket server on {socket_path}: {e}")
             raise
 
+    def _get_client_addresses(self) -> tuple:
+        """Get lists of client addresses organized by type"""
+        ws_addrs = []
+        unix_addrs = []
+
+        # Collect WebSocket client addresses
+        for client in self.ws_clients:
+            try:
+                addr = client.remote_address
+                if addr:
+                    host, port = addr
+                    ws_addrs.append(f"{host}:{port}")
+            except:
+                ws_addrs.append("unknown")
+
+        # Collect Unix socket client addresses
+        for writer in self.unix_clients:
+            try:
+                peername = writer.get_extra_info('peername', 'unknown')
+                unix_addrs.append(str(peername))
+            except:
+                unix_addrs.append("unknown")
+
+        return ws_addrs, unix_addrs
+
     def get_metrics_summary(self) -> Dict[str, Any]:
         """Calculate current metrics summary"""
         now = time.time()
@@ -328,6 +353,9 @@ class SourceRelay:
         if self.metrics['source_connected_at']:
             source_uptime = now - self.metrics['source_connected_at']
 
+        # Get client addresses
+        ws_addrs, unix_addrs = self._get_client_addresses()
+
         return {
             'uptime': uptime,
             'source_uptime': source_uptime,
@@ -341,6 +369,8 @@ class SourceRelay:
             'bytes_to_source': self.metrics['bytes_to_source'],
             'messages_per_minute': messages_per_minute,
             'avg_message_interval': avg_latency,
+            'ws_client_addrs': ws_addrs,
+            'unix_client_addrs': unix_addrs,
         }
 
     async def run(self):

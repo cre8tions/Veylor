@@ -7,7 +7,7 @@ connections, and logs without impacting WebSocket processing performance.
 """
 
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, Log
@@ -76,6 +76,59 @@ class SourceMetricsPanel(Static):
             yield MetricCard("Rate", "0", id=f"msg-rate-{self.source_idx}")
             yield MetricCard("Interval", "0.000s", id=f"avg-interval-{self.source_idx}")
 
+        # Client list widget
+        yield ClientList(self.source_idx, id=f"client-list-{self.source_idx}")
+
+
+class ClientList(Static):
+    """Widget displaying connected clients for a source"""
+
+    def __init__(self, source_idx: int, **kwargs):
+        super().__init__(**kwargs)
+        self.source_idx = source_idx
+        self.clients_data: Dict[str, List[str]] = {"ws": [], "unix": []}
+        self.border_title = f"Connected Clients"
+        self._content = ""
+        self._refresh_content()  # Initialize content
+
+    def update_clients(self, ws_clients: int, unix_clients: int,
+                      ws_addrs: Optional[List[str]] = None, unix_addrs: Optional[List[str]] = None) -> None:
+        """Update the client list display"""
+        self.clients_data["ws"] = ws_addrs if ws_addrs is not None else []
+        self.clients_data["unix"] = unix_addrs if unix_addrs is not None else []
+        self._refresh_content()
+        self.refresh()  # Force widget redraw
+
+    def _refresh_content(self) -> None:
+        """Rebuild the client list content"""
+        lines = []
+
+        total_ws = len(self.clients_data["ws"])
+        total_unix = len(self.clients_data["unix"])
+
+        # WebSocket clients
+        lines.append(f"[bold cyan]WebSocket Clients ({total_ws}):[/]")
+        if self.clients_data["ws"]:
+            for addr in self.clients_data["ws"]:
+                lines.append(f"  🔌 {addr}")
+        else:
+            lines.append("  [dim](none)[/]")
+
+        lines.append("")
+
+        # Unix socket clients
+        lines.append(f"[bold cyan]Unix Socket Clients ({total_unix}):[/]")
+        if self.clients_data["unix"]:
+            for addr in self.clients_data["unix"]:
+                lines.append(f"  🔌 {addr}")
+        else:
+            lines.append("  [dim](none)[/]")
+
+        self._content = "\n".join(lines)
+
+    def render(self) -> str:
+        return self._content
+
 
 class VeylorTUI(App):
     """Veylor Terminal User Interface Application"""
@@ -132,11 +185,21 @@ class VeylorTUI(App):
         margin-bottom: 1;
     }
 
+    ClientList {
+        border: solid $accent;
+        padding: 1;
+        height: auto;
+        max-height: 12;
+        margin-top: 1;
+        overflow-y: auto;
+        background: $surface-darken-1;
+    }
+
     SourceMetricsPanel {
         border: panel $accent;
         padding: 1;
         height: auto;
-        max-height: 30;
+        max-height: 40;
     }
 
     #log-container {
@@ -236,6 +299,23 @@ class VeylorTUI(App):
             except (LookupError, AttributeError):
                 pass
 
+            # Update client list with addresses
+            try:
+                client_list = self.query_one(f"#client-list-{idx}", ClientList)
+                ws_addrs = metrics.get('ws_client_addrs', [])
+                unix_addrs = metrics.get('unix_client_addrs', [])
+                client_list.update_clients(
+                    metrics['ws_clients'],
+                    metrics['unix_clients'],
+                    ws_addrs,
+                    unix_addrs
+                )
+            except (LookupError, AttributeError) as e:
+                pass
+            except Exception as e:
+                # Log unexpected errors to see what's happening
+                self.write_log(f"Error updating client list: {e}", "ERROR")
+
     def _format_duration(self, seconds: float) -> str:
         """Format duration in human-readable format"""
         if seconds < 60:
@@ -286,7 +366,7 @@ class VeylorTUI(App):
             else:
                 color = "white"
 
-            formatted_msg = f"[dim]{timestamp}[/] [{color}]{level:8}[/] {message}"
+            formatted_msg = f"{timestamp} [{level:8}] {message}"
             log_widget.write_line(formatted_msg)
         except (LookupError, AttributeError):
             # Silently ignore if TUI widgets are not ready yet
