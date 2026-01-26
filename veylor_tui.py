@@ -75,6 +75,17 @@ class SourceMetricsPanel(Static):
         with Horizontal(classes="compact-row"):
             yield MetricCard("Rate", "0", id=f"msg-rate-{self.source_idx}")
             yield MetricCard("Interval", "0.000s", id=f"avg-interval-{self.source_idx}")
+            yield MetricCard("Peak Rate", "0", id=f"peak-rate-{self.source_idx}")
+
+        with Horizontal(classes="compact-row"):
+            yield MetricCard("In Rate", "0 B/s", id=f"in-rate-{self.source_idx}")
+            yield MetricCard("Out Rate", "0 B/s", id=f"out-rate-{self.source_idx}")
+            yield MetricCard("Peak In", "0 B/s", id=f"peak-in-{self.source_idx}")
+
+        with Horizontal(classes="compact-row"):
+            yield MetricCard("Avg Size", "0 B", id=f"avg-size-{self.source_idx}")
+            yield MetricCard("Max Size", "0 B", id=f"max-size-{self.source_idx}")
+            yield MetricCard("Errors", "0", id=f"errors-{self.source_idx}")
 
         # Client list widget
         yield ClientList(self.source_idx, id=f"client-list-{self.source_idx}")
@@ -152,7 +163,7 @@ class VeylorTUI(App):
 
     #metrics-container {
         height: auto;
-        max-height: 60vh;
+        # max-height: 60vh;
         overflow-y: auto;
         padding: 0 1;
     }
@@ -199,7 +210,7 @@ class VeylorTUI(App):
         border: panel $accent;
         padding: 1;
         height: auto;
-        max-height: 40;
+        # max-height: 40;
     }
 
     #log-container {
@@ -296,6 +307,31 @@ class VeylorTUI(App):
                 self.query_one(f"#data-to-{idx}", MetricCard).value = self._format_bytes(metrics['bytes_to_source'])
                 self.query_one(f"#msg-rate-{idx}", MetricCard).value = str(metrics['messages_per_minute'])
                 self.query_one(f"#avg-interval-{idx}", MetricCard).value = f"{metrics['avg_message_interval']:.3f}s"
+
+                # Extended metrics
+                self.query_one(f"#peak-rate-{idx}", MetricCard).value = str(metrics.get('peak_msg_rate', 0))
+
+                in_rate = self._format_bytes(int(metrics.get('throughput_in', 0))) + "/s"
+                out_rate = self._format_bytes(int(metrics.get('throughput_out', 0))) + "/s"
+                peak_in = self._format_bytes(int(metrics.get('peak_throughput_in', 0))) + "/s"
+
+                self.query_one(f"#in-rate-{idx}", MetricCard).value = in_rate
+                self.query_one(f"#out-rate-{idx}", MetricCard).value = out_rate
+                self.query_one(f"#peak-in-{idx}", MetricCard).value = peak_in
+
+                self.query_one(f"#avg-size-{idx}", MetricCard).value = self._format_bytes(int(metrics.get('avg_msg_size', 0)))
+                self.query_one(f"#max-size-{idx}", MetricCard).value = self._format_bytes(int(metrics.get('max_msg_size', 0)))
+
+                errors = metrics.get('errors', {})
+                total_errors = sum(errors.values()) if errors else 0
+                error_card = self.query_one(f"#errors-{idx}", MetricCard)
+                error_card.value = str(total_errors)
+                if total_errors > 0:
+                     error_card.styles.background = "red"  # Alert on error
+                     error_card.styles.color = "white"
+                else:
+                     error_card.styles.background = None
+                     error_card.styles.color = None
             except (LookupError, AttributeError):
                 pass
 

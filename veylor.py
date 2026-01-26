@@ -76,57 +76,101 @@ class SourceRelay:
             'start_time': time.time(),
             'last_message_time': None,
             'source_connected_at': None,
+            # Extended metrics
+            'bytes_ts_from': deque(maxlen=50000),  # (timestamp, bytes) for throughput calc
+            'bytes_ts_to': deque(maxlen=50000),
+            'peak_msg_rate': 0,
+            'peak_throughput_in': 0,
+            'peak_throughput_out': 0,
+            'min_msg_size': float('inf'),
+            'max_msg_size': 0,
+            'total_msg_size': 0,
+            'error_counts': {
+                'connection_errors': 0,
+                'send_errors': 0,
+                'dropped_messages': 0
+            }
         }
 
     async def broadcast_message(self, message: bytes):
         """Broadcast message to all connected clients (non-blocking)"""
         # Update metrics
         now = time.time()
+        msg_len = len(message)
+
         self.metrics['messages_from_source'] += 1
-        self.metrics['bytes_from_source'] += len(message)
+        self.metrics['bytes_from_source'] += msg_len
         self.metrics['last_message_time'] = now
         self.metrics['message_timestamps'].append(now)
 
-        # Broadcast to WebSocket clients
+        # Extended metrics updates
+        self.metrics['bytes_ts_from'].append((now, msg_len))
+        self.metrics['min_msg_size'] = min(self.metrics['min_msg_size'], msg_len)
+        self.metrics['max_msg_size'] = max(self.metrics['max_msg_size'], msg_len)
+        self.metrics['total_msg_size'] += msg_len
+
+        # Broadcast to WebSocket clients (concurrent, non-blocking)
         if self.ws_clients:
-            # Use asyncio.gather for concurrent sending
             ws_tasks = []
             for client in self.ws_clients.copy():
                 try:
                     ws_tasks.append(asyncio.create_task(client.send(message)))
                 except Exception as e:
                     logger.error(f"Error queuing WebSocket message: {e}")
+                    self.metrics['error_counts']['send_errors'] += 1
                     self.ws_clients.discard(client)
 
-            # Wait for all sends to complete (non-blocking)
+            # Don't await here - let tasks run concurrently
             if ws_tasks:
-                results = await asyncio.gather(*ws_tasks, return_exceptions=True)
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logger.error(f"Error sending to WebSocket client: {result}")
+                asyncio.create_task(self._wait_ws_sends(ws_tasks))
 
-        # Broadcast to Unix socket clients
+        # Broadcast to Unix socket clients (concurrent, non-blocking)
         if self.unix_clients:
             unix_tasks = []
             for writer in self.unix_clients.copy():
                 try:
-                    # Write message with length prefix for framing
-                    msg_len = len(message)
-                    writer.write(msg_len.to_bytes(4, byteorder='big'))
-                    writer.write(message)
-                    unix_tasks.append(asyncio.create_task(writer.drain()))
+                    # Queue the send/drain as a task to avoid blocking
+                    unix_tasks.append(asyncio.create_task(self._send_unix_message(writer, message)))
                 except Exception as e:
                     logger.error(f"Error queuing Unix socket message: {e}")
                     self.unix_clients.discard(writer)
-                    try:
-                        writer.close()
-                        await writer.wait_closed()
-                    except:
-                        pass
 
-            # Wait for all drains to complete
+            # Don't await here - let tasks run concurrently
             if unix_tasks:
-                await asyncio.gather(*unix_tasks, return_exceptions=True)
+                asyncio.create_task(self._wait_unix_sends(unix_tasks))
+
+    async def _wait_ws_sends(self, tasks):
+        """Wait for WebSocket sends to complete"""
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.debug(f"WebSocket send error: {result}")
+        except Exception:
+            pass
+
+    async def _wait_unix_sends(self, tasks):
+        """Wait for Unix socket sends to complete"""
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception:
+            pass
+
+    async def _send_unix_message(self, writer: asyncio.StreamWriter, message: bytes):
+        """Send message to a single Unix socket client"""
+        try:
+            msg_len = len(message)
+            writer.write(msg_len.to_bytes(4, byteorder='big'))
+            writer.write(message)
+            await writer.drain()
+        except Exception as e:
+            logger.error(f"Error sending to Unix socket client: {e}")
+            self.unix_clients.discard(writer)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except:
+                pass
 
     async def handle_websocket_client(self, websocket, path=None):
         """Handle incoming WebSocket client connection"""
@@ -141,8 +185,12 @@ class SourceRelay:
                     try:
                         # Update metrics
                         msg_bytes = message if isinstance(message, bytes) else message.encode('utf-8')
+                        msg_len = len(msg_bytes)
                         self.metrics['messages_to_source'] += 1
-                        self.metrics['bytes_to_source'] += len(msg_bytes)
+                        self.metrics['bytes_to_source'] += msg_len
+                        # Extended metrics
+                        now = time.time()
+                        self.metrics['bytes_ts_to'].append((now, msg_len))
 
                         await self.source_connection.send(message)
                         logger.debug(f"Forwarded message from client {client_addr} to source")
@@ -202,6 +250,9 @@ class SourceRelay:
                         # Update metrics
                         self.metrics['messages_to_source'] += 1
                         self.metrics['bytes_to_source'] += len(message)
+                        # Extended metrics
+                        now = time.time()
+                        self.metrics['bytes_ts_to'].append((now, len(message)))
 
                         await self.source_connection.send(message)
                         logger.debug(f"Forwarded message from Unix client {peer} to source")
@@ -356,6 +407,38 @@ class SourceRelay:
         # Get client addresses
         ws_addrs, unix_addrs = self._get_client_addresses()
 
+        # Calculate throughput (bytes/sec) - last 5 seconds
+        throughput_in = 0
+        throughput_out = 0
+        window = 5.0
+
+        # Ingress throughput
+        recent_bytes_in = [b for t, b in self.metrics['bytes_ts_from'] if now - t < window]
+        if recent_bytes_in:
+            throughput_in = sum(recent_bytes_in) / window
+
+        # Egress throughput (approximate by multiplying ingress by clients for broadcast + client msgs)
+        # For more accuracy, we'd track per-client sends, but this is a good approximation for broadcast
+        total_clients = len(self.ws_clients) + len(self.unix_clients)
+        throughput_out = throughput_in * total_clients
+
+        # Add client-to-source throughput
+        recent_bytes_to = [b for t, b in self.metrics['bytes_ts_to'] if now - t < window]
+        if recent_bytes_to:
+            client_upload_rate = sum(recent_bytes_to) / window
+            throughput_in += client_upload_rate # Client uploads are ingress to relay
+            throughput_out += client_upload_rate # And egress to source
+
+        # Update peaks
+        self.metrics['peak_msg_rate'] = max(self.metrics['peak_msg_rate'], messages_per_minute)
+        self.metrics['peak_throughput_in'] = max(self.metrics['peak_throughput_in'], throughput_in)
+        self.metrics['peak_throughput_out'] = max(self.metrics['peak_throughput_out'], throughput_out)
+
+        # Avg message size
+        avg_msg_size = 0
+        if self.metrics['messages_from_source'] > 0:
+            avg_msg_size = self.metrics['total_msg_size'] / self.metrics['messages_from_source']
+
         return {
             'uptime': uptime,
             'source_uptime': source_uptime,
@@ -371,6 +454,14 @@ class SourceRelay:
             'avg_message_interval': avg_latency,
             'ws_client_addrs': ws_addrs,
             'unix_client_addrs': unix_addrs,
+            # Enhanced metrics
+            'throughput_in': throughput_in,
+            'throughput_out': throughput_out,
+            'peak_msg_rate': self.metrics['peak_msg_rate'],
+            'peak_throughput_in': self.metrics['peak_throughput_in'],
+            'max_msg_size': self.metrics['max_msg_size'],
+            'avg_msg_size': avg_msg_size,
+            'errors': self.metrics['error_counts']
         }
 
     async def run(self):
@@ -519,42 +610,42 @@ class WebSocketRelay:
             source_url = relay.source_config.get('url', 'unknown')
 
             # Format source header
-            print(f"\n🔗 Source #{idx}: {source_url}")
-            print("-" * 80)
+            logger.info(f"\n🔗 Source #{idx}: {source_url}")
+            logger.info("-" * 80)
 
             # Connection status
             status_icon = "🟢" if metrics['source_connected'] else "🔴"
             status_text = "Connected" if metrics['source_connected'] else "Disconnected"
-            print(f"{status_icon} Status: {status_text}")
+            logger.info(f"{status_icon} Status: {status_text}")
 
             # Uptime
             uptime_str = self._format_duration(metrics['uptime'])
-            print(f"⏱️  Relay Uptime: {uptime_str}")
+            logger.info(f"⏱️  Relay Uptime: {uptime_str}")
             if metrics['source_connected']:
                 source_uptime_str = self._format_duration(metrics['source_uptime'])
-                print(f"🔌 Source Connected: {source_uptime_str}")
+                logger.info(f"🔌 Source Connected: {source_uptime_str}")
 
             # Client connections
-            print(f"👥 Connected Clients: {metrics['total_clients']} "
+            logger.info(f"👥 Connected Clients: {metrics['total_clients']} "
                        f"(WebSocket: {metrics['ws_clients']}, Unix: {metrics['unix_clients']})")
 
             # Message flow - Source to Clients
-            print(f"\n📥 Source → Clients:")
-            print(f"   Messages: {metrics['messages_from_source']:,}")
-            print(f"   Data: {self._format_bytes(metrics['bytes_from_source'])}")
-            print(f"   Rate: {metrics['messages_per_minute']} msg/min")
+            logger.info(f"\n📥 Source → Clients:")
+            logger.info(f"   Messages: {metrics['messages_from_source']:,}")
+            logger.info(f"   Data: {self._format_bytes(metrics['bytes_from_source'])}")
+            logger.info(f"   Rate: {metrics['messages_per_minute']} msg/min")
 
             if metrics['avg_message_interval'] > 0:
-                print(f"   Avg Interval: {metrics['avg_message_interval']:.3f}s")
+                logger.info(f"   Avg Interval: {metrics['avg_message_interval']:.3f}s")
 
             # Message flow - Clients to Source
-            print(f"\n📤 Clients → Source:")
-            print(f"   Messages: {metrics['messages_to_source']:,}")
-            print(f"   Data: {self._format_bytes(metrics['bytes_to_source'])}")
+            logger.info(f"\n📤 Clients → Source:")
+            logger.info(f"   Messages: {metrics['messages_to_source']:,}")
+            logger.info(f"   Data: {self._format_bytes(metrics['bytes_to_source'])}")
 
-        print("")
-        print(separator)
-        print("")
+        logger.info("")
+        logger.info(separator)
+        logger.info("")
     def _format_duration(self, seconds: float) -> str:
         """Format duration in human-readable format"""
         if seconds < 60:
