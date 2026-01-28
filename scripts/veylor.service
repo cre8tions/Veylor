@@ -1,0 +1,13 @@
+[Unit]
+Description=Veyllor Websocket Reflector
+After=network.target
+
+[Service]
+User=joe
+WorkingDirectory=/path/to/your/script/
+ExecStart=/usr/bin/python3 veylor.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
