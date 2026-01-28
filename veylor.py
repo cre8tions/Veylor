@@ -76,6 +76,7 @@ class SourceRelay:
             'start_time': time.time(),
             'last_message_time': None,
             'source_connected_at': None,
+            'source_latency': 0.0,  # Connection latency in seconds from websockets module
             # Extended metrics
             'bytes_ts_from': deque(maxlen=50000),  # (timestamp, bytes) for throughput calc
             'bytes_ts_to': deque(maxlen=50000),
@@ -295,7 +296,9 @@ class SourceRelay:
                 async with ws_connect(url, additional_headers=headers) as websocket:
                     self.source_connection = websocket
                     self.metrics['source_connected_at'] = time.time()
-                    logger.info(f"Connected to source: {url}")
+                    # Capture latency from websockets connection object (in seconds)
+                    self.metrics['source_latency'] = websocket.latency
+                    logger.info(f"Connected to source: {url} (latency: {self.metrics['source_latency']*1000:.2f}ms)")
                     attempt = 0  # Reset attempt counter on successful connection
 
                     # Receive and broadcast messages
@@ -443,6 +446,7 @@ class SourceRelay:
             'uptime': uptime,
             'source_uptime': source_uptime,
             'source_connected': self.source_connection is not None,
+            'source_latency': self.metrics['source_latency'],
             'ws_clients': len(self.ws_clients),
             'unix_clients': len(self.unix_clients),
             'total_clients': len(self.ws_clients) + len(self.unix_clients),

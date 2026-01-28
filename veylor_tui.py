@@ -59,33 +59,46 @@ class SourceMetricsPanel(Static):
         # Compact vertical layout for each source
         yield ConnectionStatus(id=f"conn-status-{self.source_idx}")
 
-        with Horizontal(classes="compact-row"):
-            yield MetricCard("Clients", "0", id=f"clients-{self.source_idx}")
-            yield MetricCard("WS", "0", id=f"ws-clients-{self.source_idx}")
-            yield MetricCard("Unix", "0", id=f"unix-clients-{self.source_idx}")
+        yield Horizontal(
+            MetricCard("Clients", "0", id=f"clients-{self.source_idx}"),
+            MetricCard("WS", "0", id=f"ws-clients-{self.source_idx}"),
+            MetricCard("Unix", "0", id=f"unix-clients-{self.source_idx}"),
+            MetricCard("Latency", "0ms", id=f"latency-{self.source_idx}"),
+            classes="compact-row"
+        )
 
-        with Horizontal(classes="compact-row"):
-            yield MetricCard("Msg In", "0", id=f"msg-from-{self.source_idx}")
-            yield MetricCard("Msg Out", "0", id=f"msg-to-{self.source_idx}")
+        yield Horizontal(
+            MetricCard("Msg In", "0", id=f"msg-from-{self.source_idx}"),
+            MetricCard("Msg Out", "0", id=f"msg-to-{self.source_idx}"),
+            classes="compact-row"
+        )
 
-        with Horizontal(classes="compact-row"):
-            yield MetricCard("Data In", "0 B", id=f"data-from-{self.source_idx}")
-            yield MetricCard("Data Out", "0 B", id=f"data-to-{self.source_idx}")
+        yield Horizontal(
+            MetricCard("Data In", "0 B", id=f"data-from-{self.source_idx}"),
+            MetricCard("Data Out", "0 B", id=f"data-to-{self.source_idx}"),
+            classes="compact-row"
+        )
 
-        with Horizontal(classes="compact-row"):
-            yield MetricCard("Rate", "0", id=f"msg-rate-{self.source_idx}")
-            yield MetricCard("Interval", "0.000s", id=f"avg-interval-{self.source_idx}")
-            yield MetricCard("Peak Rate", "0", id=f"peak-rate-{self.source_idx}")
+        yield Horizontal(
+            MetricCard("Rate", "0", id=f"msg-rate-{self.source_idx}"),
+            MetricCard("Interval", "0.000s", id=f"avg-interval-{self.source_idx}"),
+            MetricCard("Peak Rate", "0", id=f"peak-rate-{self.source_idx}"),
+            classes="compact-row"
+        )
 
-        with Horizontal(classes="compact-row"):
-            yield MetricCard("In Rate", "0 B/s", id=f"in-rate-{self.source_idx}")
-            yield MetricCard("Out Rate", "0 B/s", id=f"out-rate-{self.source_idx}")
-            yield MetricCard("Peak In", "0 B/s", id=f"peak-in-{self.source_idx}")
+        yield Horizontal(
+            MetricCard("In Rate", "0 B/s", id=f"in-rate-{self.source_idx}"),
+            MetricCard("Out Rate", "0 B/s", id=f"out-rate-{self.source_idx}"),
+            MetricCard("Peak In", "0 B/s", id=f"peak-in-{self.source_idx}"),
+            classes="compact-row"
+        )
 
-        with Horizontal(classes="compact-row"):
-            yield MetricCard("Avg Size", "0 B", id=f"avg-size-{self.source_idx}")
-            yield MetricCard("Max Size", "0 B", id=f"max-size-{self.source_idx}")
-            yield MetricCard("Errors", "0", id=f"errors-{self.source_idx}")
+        yield Horizontal(
+            MetricCard("Avg Size", "0 B", id=f"avg-size-{self.source_idx}"),
+            MetricCard("Max Size", "0 B", id=f"max-size-{self.source_idx}"),
+            MetricCard("Errors", "0", id=f"errors-{self.source_idx}"),
+            classes="compact-row"
+        )
 
         # Client list widget
         yield ClientList(self.source_idx, id=f"client-list-{self.source_idx}")
@@ -176,8 +189,9 @@ class VeylorTUI(App):
     }
 
     .compact-row {
-        height: auto;
-        margin-bottom: 0;
+        height: 5;
+        width: 100%;
+        layout: horizontal;
     }
 
     MetricCard {
@@ -185,13 +199,13 @@ class VeylorTUI(App):
         padding: 0 1;
         margin-right: 1;
         height: 4;
-        min-width: 8;
+        width: 1fr;
     }
 
     ConnectionStatus {
         border: solid $success;
         padding: 0 1;
-        height: 4;
+        height: 5;
         width: 100%;
         margin-bottom: 1;
     }
@@ -200,7 +214,7 @@ class VeylorTUI(App):
         border: solid $accent;
         padding: 1;
         height: auto;
-        max-height: 12;
+        # max-height: 12;
         margin-top: 1;
         overflow-y: auto;
         background: $surface-darken-1;
@@ -210,7 +224,7 @@ class VeylorTUI(App):
         border: panel $accent;
         padding: 1;
         height: auto;
-        # max-height: 40;
+        layout: vertical;
     }
 
     #log-container {
@@ -269,6 +283,9 @@ class VeylorTUI(App):
 
     def _initialize_source_panels(self) -> None:
         """Initialize metric panels for each source"""
+        if not self.relay_instance:
+            return
+
         container = self.query_one("#sources-grid")
 
         for idx, source_relay in enumerate(self.relay_instance.source_relays, 1):
@@ -289,6 +306,7 @@ class VeylorTUI(App):
                 conn_status = self.query_one(f"#conn-status-{idx}", ConnectionStatus)
                 if metrics['source_connected']:
                     conn_status.status = "🟢 Connected"
+
                 else:
                     conn_status.status = "🔴 Disconnected"
                 conn_status.url = source_url[:40] + "..." if len(source_url) > 40 else source_url
@@ -301,6 +319,9 @@ class VeylorTUI(App):
                 self.query_one(f"#clients-{idx}", MetricCard).value = str(metrics['total_clients'])
                 self.query_one(f"#ws-clients-{idx}", MetricCard).value = str(metrics['ws_clients'])
                 self.query_one(f"#unix-clients-{idx}", MetricCard).value = str(metrics['unix_clients'])
+                # Convert latency from seconds to milliseconds for display
+                latency_ms = metrics.get('source_latency', 0) * 1000
+                self.query_one(f"#latency-{idx}", MetricCard).value = f"{latency_ms:.2f}ms"
                 self.query_one(f"#msg-from-{idx}", MetricCard).value = f"{metrics['messages_from_source']:,}"
                 self.query_one(f"#msg-to-{idx}", MetricCard).value = f"{metrics['messages_to_source']:,}"
                 self.query_one(f"#data-from-{idx}", MetricCard).value = self._format_bytes(metrics['bytes_from_source'])
