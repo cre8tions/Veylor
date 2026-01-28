@@ -321,7 +321,7 @@ class VeylorTUI(App):
                 self.query_one(f"#unix-clients-{idx}", MetricCard).value = str(metrics['unix_clients'])
                 # Convert latency from seconds to milliseconds for display
                 latency_ms = metrics.get('source_latency', 0) * 1000
-                self.query_one(f"#latency-{idx}", MetricCard).value = f"{latency_ms:.2f}ms"
+                self.query_one(f"#latency-{idx}", MetricCard).value = f"{latency_ms:.4f}ms"
                 self.query_one(f"#msg-from-{idx}", MetricCard).value = f"{metrics['messages_from_source']:,}"
                 self.query_one(f"#msg-to-{idx}", MetricCard).value = f"{metrics['messages_to_source']:,}"
                 self.query_one(f"#data-from-{idx}", MetricCard).value = self._format_bytes(metrics['bytes_from_source'])

@@ -12,6 +12,7 @@ import signal
 import sys
 import os
 import time
+import weakref
 import uvloop
 from typing import Set, Optional, Dict, Any, List
 from collections import deque
@@ -66,13 +67,16 @@ class SourceRelay:
         self.source_connection = None
         self.servers = []
 
+        # Track pending broadcast tasks to prevent memory leaks from fire-and-forget patterns
+        self._pending_tasks: Set[asyncio.Task] = set()
+
         # Metrics tracking
         self.metrics = {
             'messages_from_source': 0,
             'messages_to_source': 0,
             'bytes_from_source': 0,
             'bytes_to_source': 0,
-            'message_timestamps': deque(maxlen=50000),  # Keep last 1000 message timestamps
+            'message_timestamps': deque(maxlen=50000),  # Keep last 10000 message timestamps for rate calculation
             'start_time': time.time(),
             'last_message_time': None,
             'source_connected_at': None,
@@ -83,9 +87,10 @@ class SourceRelay:
             'peak_msg_rate': 0,
             'peak_throughput_in': 0,
             'peak_throughput_out': 0,
-            'min_msg_size': float('inf'),
+            'min_msg_size': 0,  # Will be set on first message
             'max_msg_size': 0,
             'total_msg_size': 0,
+            'msg_count_for_avg': 0,  # Separate counter for rolling average calculation
             'error_counts': {
                 'connection_errors': 0,
                 'send_errors': 0,
@@ -106,9 +111,20 @@ class SourceRelay:
 
         # Extended metrics updates
         self.metrics['bytes_ts_from'].append((now, msg_len))
-        self.metrics['min_msg_size'] = min(self.metrics['min_msg_size'], msg_len)
+        # Update min_msg_size (0 means not yet set)
+        if self.metrics['min_msg_size'] == 0 or msg_len < self.metrics['min_msg_size']:
+            self.metrics['min_msg_size'] = msg_len
         self.metrics['max_msg_size'] = max(self.metrics['max_msg_size'], msg_len)
-        self.metrics['total_msg_size'] += msg_len
+
+        # Use rolling average calculation to prevent unbounded growth
+        # Keep a window of last N messages for average calculation
+        self.metrics['msg_count_for_avg'] += 1
+        # Exponential moving average to prevent unbounded accumulation
+        alpha = 0.01  # Smoothing factor for EMA
+        if self.metrics['total_msg_size'] == 0:
+            self.metrics['total_msg_size'] = msg_len
+        else:
+            self.metrics['total_msg_size'] = (1 - alpha) * self.metrics['total_msg_size'] + alpha * msg_len
 
         # Broadcast to WebSocket clients (concurrent, non-blocking)
         if self.ws_clients:
@@ -122,8 +138,10 @@ class SourceRelay:
                     self.ws_clients.discard(client)
 
             # Don't await here - let tasks run concurrently
+            # Track task to prevent memory leak from fire-and-forget pattern
             if ws_tasks:
-                asyncio.create_task(self._wait_ws_sends(ws_tasks))
+                task = asyncio.create_task(self._wait_ws_sends(ws_tasks))
+                self._track_task(task)
 
         # Broadcast to Unix socket clients (concurrent, non-blocking)
         if self.unix_clients:
@@ -137,8 +155,15 @@ class SourceRelay:
                     self.unix_clients.discard(writer)
 
             # Don't await here - let tasks run concurrently
+            # Track task to prevent memory leak from fire-and-forget pattern
             if unix_tasks:
-                asyncio.create_task(self._wait_unix_sends(unix_tasks))
+                task = asyncio.create_task(self._wait_unix_sends(unix_tasks))
+                self._track_task(task)
+
+    def _track_task(self, task: asyncio.Task) -> None:
+        """Track a fire-and-forget task to prevent memory leaks"""
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     async def _wait_ws_sends(self, tasks):
         """Wait for WebSocket sends to complete"""
@@ -146,9 +171,10 @@ class SourceRelay:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
                 if isinstance(result, Exception):
+                    self.metrics['error_counts']['send_errors'] += 1
                     logger.debug(f"WebSocket send error: {result}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error in _wait_ws_sends: {e}")
 
     async def _wait_unix_sends(self, tasks):
         """Wait for Unix socket sends to complete"""
@@ -437,10 +463,8 @@ class SourceRelay:
         self.metrics['peak_throughput_in'] = max(self.metrics['peak_throughput_in'], throughput_in)
         self.metrics['peak_throughput_out'] = max(self.metrics['peak_throughput_out'], throughput_out)
 
-        # Avg message size
-        avg_msg_size = 0
-        if self.metrics['messages_from_source'] > 0:
-            avg_msg_size = self.metrics['total_msg_size'] / self.metrics['messages_from_source']
+        # Avg message size (using exponential moving average stored in total_msg_size)
+        avg_msg_size = self.metrics['total_msg_size'] if self.metrics['messages_from_source'] > 0 else 0
 
         return {
             'uptime': uptime,
@@ -465,8 +489,93 @@ class SourceRelay:
             'peak_throughput_in': self.metrics['peak_throughput_in'],
             'max_msg_size': self.metrics['max_msg_size'],
             'avg_msg_size': avg_msg_size,
-            'errors': self.metrics['error_counts']
+            'errors': self.metrics['error_counts'],
+            'pending_tasks': len(self._pending_tasks)  # For debugging task accumulation
         }
+
+    def reset_metrics(self, preserve_peaks: bool = False) -> None:
+        """Reset metrics counters to prevent unbounded growth.
+
+        Args:
+            preserve_peaks: If True, keep peak values; otherwise reset everything
+        """
+        now = time.time()
+
+        # Store peaks if we want to preserve them
+        old_peaks = {}
+        if preserve_peaks:
+            old_peaks = {
+                'peak_msg_rate': self.metrics['peak_msg_rate'],
+                'peak_throughput_in': self.metrics['peak_throughput_in'],
+                'peak_throughput_out': self.metrics['peak_throughput_out'],
+            }
+
+        # Reset counters
+        self.metrics['messages_from_source'] = 0
+        self.metrics['messages_to_source'] = 0
+        self.metrics['bytes_from_source'] = 0
+        self.metrics['bytes_to_source'] = 0
+        self.metrics['msg_count_for_avg'] = 0
+
+        # Clear deques
+        self.metrics['message_timestamps'].clear()
+        self.metrics['bytes_ts_from'].clear()
+        self.metrics['bytes_ts_to'].clear()
+
+        # Reset size metrics
+        self.metrics['min_msg_size'] = 0
+        self.metrics['max_msg_size'] = 0
+        self.metrics['total_msg_size'] = 0
+
+        # Reset error counts
+        for key in self.metrics['error_counts']:
+            self.metrics['error_counts'][key] = 0
+
+        # Reset peaks if not preserving
+        if not preserve_peaks:
+            self.metrics['peak_msg_rate'] = 0
+            self.metrics['peak_throughput_in'] = 0
+            self.metrics['peak_throughput_out'] = 0
+        else:
+            self.metrics.update(old_peaks)
+
+        # Update start time to now for uptime calculation
+        self.metrics['start_time'] = now
+
+        logger.info(f"Metrics reset for source {self.source_config.get('url', 'unknown')}")
+
+    def cleanup_stale_data(self, max_age_seconds: float = 120.0) -> int:
+        """Remove stale entries from deques older than max_age_seconds.
+
+        This helps prevent memory buildup when the application runs for long periods.
+        Returns the number of entries cleaned up.
+
+        Args:
+            max_age_seconds: Maximum age of entries to keep (default: 120 seconds)
+
+        Returns:
+            Number of entries removed
+        """
+        now = time.time()
+        cutoff = now - max_age_seconds
+        cleaned = 0
+
+        # Clean message_timestamps deque
+        while self.metrics['message_timestamps'] and self.metrics['message_timestamps'][0] < cutoff:
+            self.metrics['message_timestamps'].popleft()
+            cleaned += 1
+
+        # Clean bytes_ts_from deque
+        while self.metrics['bytes_ts_from'] and self.metrics['bytes_ts_from'][0][0] < cutoff:
+            self.metrics['bytes_ts_from'].popleft()
+            cleaned += 1
+
+        # Clean bytes_ts_to deque
+        while self.metrics['bytes_ts_to'] and self.metrics['bytes_ts_to'][0][0] < cutoff:
+            self.metrics['bytes_ts_to'].popleft()
+            cleaned += 1
+
+        return cleaned
 
     async def run(self):
         """Run this source relay"""
@@ -491,6 +600,16 @@ class SourceRelay:
         """Graceful shutdown"""
         logger.info(f"Shutting down source relay for {self.source_config['url']}...")
         self.running = False
+
+        # Cancel and await all pending broadcast tasks to prevent leaks
+        if self._pending_tasks:
+            for task in self._pending_tasks.copy():
+                if not task.done():
+                    task.cancel()
+            # Wait for all pending tasks to complete/cancel
+            if self._pending_tasks:
+                await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+            self._pending_tasks.clear()
 
         # Close source connection to break out of receive loop
         if self.source_connection:
@@ -583,10 +702,21 @@ class WebSocketRelay:
             await self.shutdown()
 
     async def display_metrics_periodically(self):
-        """Display metrics for all sources periodically"""
+        """Display metrics for all sources periodically and perform cleanup"""
+        cleanup_counter = 0
         try:
             while self.running:
                 await asyncio.sleep(60)  # Display every 60 seconds
+
+                # Perform stale data cleanup every 5 minutes (every 5th iteration)
+                cleanup_counter += 1
+                if cleanup_counter >= 5:
+                    cleanup_counter = 0
+                    total_cleaned = 0
+                    for source_relay in self.source_relays:
+                        total_cleaned += source_relay.cleanup_stale_data(max_age_seconds=120.0)
+                    if total_cleaned > 0:
+                        logger.debug(f"Cleaned up {total_cleaned} stale metric entries")
 
                 # Display metrics for all sources
                 self.display_metrics()
@@ -783,41 +913,41 @@ async def main(config_path: str, use_tui: bool = False):
         done, pending = await asyncio.wait(
             {relay_task, shutdown_task},
             return_when=asyncio.FIRST_COMPLETED
-    )
+        )
 
-    # If shutdown was signaled, trigger shutdown and wait
-    if shutdown_event.is_set():
-        logger.info("Initiating graceful shutdown...")
-        relay.running = False
+        # If shutdown was signaled, trigger shutdown and wait
+        if shutdown_event.is_set():
+            logger.info("Initiating graceful shutdown...")
+            relay.running = False
 
-        # Close all source connections to break receive loops
-        for source_relay in relay.source_relays:
-            source_relay.running = False
-            if source_relay.source_connection:
+            # Close all source connections to break receive loops
+            for source_relay in relay.source_relays:
+                source_relay.running = False
+                if source_relay.source_connection:
+                    try:
+                        await source_relay.source_connection.close()
+                    except Exception:
+                        pass
+
+            # Wait for relay to finish shutting down (with timeout)
+            if not relay_task.done():
                 try:
-                    await source_relay.source_connection.close()
-                except Exception:
-                    pass
+                    await asyncio.wait_for(relay_task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Relay shutdown timed out, forcing cancellation")
+                    relay_task.cancel()
+                    try:
+                        await relay_task
+                    except asyncio.CancelledError:
+                        pass
 
-        # Wait for relay to finish shutting down (with timeout)
-        if not relay_task.done():
+        # Cancel any remaining tasks
+        for task in pending:
+            task.cancel()
             try:
-                await asyncio.wait_for(relay_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Relay shutdown timed out, forcing cancellation")
-                relay_task.cancel()
-                try:
-                    await relay_task
-                except asyncio.CancelledError:
-                    pass
-
-    # Cancel any remaining tasks
-    for task in pending:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 
