@@ -322,15 +322,30 @@ class SourceRelay:
                 async with ws_connect(url, additional_headers=headers) as websocket:
                     self.source_connection = websocket
                     self.metrics['source_connected_at'] = time.time()
-                    # Capture latency from websockets connection object (in seconds)
-                    self.metrics['source_latency'] = websocket.latency
-                    logger.info(f"Connected to source: {url} (latency: {self.metrics['source_latency']*1000:.2f}ms)")
+
+                    # Send initial ping to measure connection latency
+                    # The websocket.latency property is 0 until first ping/pong exchange
+                    try:
+                        pong_waiter = await websocket.ping()
+                        initial_latency = await pong_waiter
+                        self.metrics['source_latency'] = initial_latency
+                        logger.info(f"Connected to source: {url} (latency: {initial_latency*1000:.2f}ms)")
+                    except Exception as e:
+                        logger.warning(f"Could not measure initial latency for {url}: {e}")
+                        self.metrics['source_latency'] = 0.0
+                        logger.info(f"Connected to source: {url}")
+
                     attempt = 0  # Reset attempt counter on successful connection
 
                     # Receive and broadcast messages
                     async for message in websocket:
                         if not self.running:
                             break
+
+                        # Update latency from the websocket's built-in keepalive pings
+                        # This is updated automatically after each ping/pong exchange
+                        if websocket.latency > 0:
+                            self.metrics['source_latency'] = websocket.latency
 
                         # Handle both text and binary messages
                         if isinstance(message, str):
