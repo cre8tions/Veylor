@@ -24,10 +24,11 @@ import argparse
 
 # TUI support (imported conditionally)
 try:
-    from veylor_tui import VeylorTUI, TUILogHandler
+    from veylor_tui import VeylorTUI
     TUI_AVAILABLE = True
 except ImportError:
     TUI_AVAILABLE = False
+    VeylorTUI = None  # type: ignore
 
 
 # Configure logging
@@ -36,23 +37,6 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger('veylor')
-
-
-class TUILoggingHandler(logging.Handler):
-    """Custom logging handler that routes logs to the TUI"""
-
-    def __init__(self, tui_handler):
-        super().__init__()
-        self.tui_handler = tui_handler
-
-    def emit(self, record):
-        try:
-            # Get just the message without timestamp/level
-            msg = record.getMessage()
-            self.tui_handler.write(msg, record.levelname)
-        except Exception:
-            self.handleError(record)
-
 
 
 class SourceRelay:
@@ -667,12 +651,13 @@ class SourceRelay:
 class WebSocketRelay:
     """High-performance WebSocket relay orchestrator"""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], tui_mode: bool = False):
         self.config = config
         self.source_relays = []
         self.source_tasks = []
         self.running = True
         self.metrics_task = None
+        self.tui_mode = tui_mode  # Skip periodic metrics display when TUI is active
 
     async def run(self):
         """Run the relay service"""
@@ -703,8 +688,10 @@ class WebSocketRelay:
                 logger.error("No valid sources configured. Exiting.")
                 return
 
-            # Start metrics display task
-            self.metrics_task = asyncio.create_task(self.display_metrics_periodically())
+            # Start metrics display task only when TUI is not active
+            # (TUI has its own real-time metrics display)
+            if not self.tui_mode:
+                self.metrics_task = asyncio.create_task(self.display_metrics_periodically())
 
             # Wait for all source relays to complete
             await asyncio.gather(*self.source_tasks)
@@ -865,7 +852,7 @@ async def main(config_path: str, use_tui: bool = False):
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
     config = load_config(config_path)
-    relay = WebSocketRelay(config)
+    relay = WebSocketRelay(config, tui_mode=use_tui)
 
     # Setup signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
@@ -880,29 +867,22 @@ async def main(config_path: str, use_tui: bool = False):
 
     if use_tui and TUI_AVAILABLE:
         # Run with TUI
-        app = VeylorTUI(relay_instance=relay)
+        app = VeylorTUI(relay_instance=relay) if VeylorTUI else None
 
-        # Create TUI log handler
-        tui_handler = TUILogHandler(app)
-        tui_logging_handler = TUILoggingHandler(tui_handler)
-
-        # Remove console handlers and add TUI handler for veylor logger
-        veylor_logger = logging.getLogger('veylor')
-        for handler in veylor_logger.handlers[:]:
-            veylor_logger.removeHandler(handler)
-        veylor_logger.addHandler(tui_logging_handler)
-
-        # Also suppress root logger to prevent stdout output
+        # Suppress console logging when TUI is active to prevent output corruption
         root_logger = logging.getLogger()
         for handler in root_logger.handlers[:]:
             if isinstance(handler, logging.StreamHandler):
                 root_logger.removeHandler(handler)
+        veylor_logger = logging.getLogger('veylor')
+        for handler in veylor_logger.handlers[:]:
+            veylor_logger.removeHandler(handler)
 
         # Run relay and TUI concurrently
         relay_task = asyncio.create_task(relay.run())
 
         try:
-            await app.run_async()
+            await app.run_async() if app else None
         except Exception as e:
             logger.error(f"TUI error: {e}")
         finally:

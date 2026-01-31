@@ -2,15 +2,14 @@
 """
 Veylor TUI - Terminal User Interface for Veylor WebSocket Relay
 
-Provides an attractive, real-time dashboard for monitoring relay metrics,
-connections, and logs without impacting WebSocket processing performance.
+Provides an attractive, real-time dashboard for monitoring relay metrics
+and connections without impacting WebSocket processing performance.
 """
 
-from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Static, Log
+from textual.widgets import Header, Footer, Static
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 
@@ -105,7 +104,11 @@ class SourceMetricsPanel(Static):
 
 
 class ClientList(Static):
-    """Widget displaying connected clients for a source"""
+    """Widget displaying connected clients for a source.
+
+    Includes change detection to avoid unnecessary string rebuilds
+    and reduce memory allocation churn.
+    """
 
     def __init__(self, source_idx: int, **kwargs):
         super().__init__(**kwargs)
@@ -113,13 +116,29 @@ class ClientList(Static):
         self.clients_data: Dict[str, List[str]] = {"ws": [], "unix": []}
         self.border_title = f"Connected Clients"
         self._content = ""
+        # Track last state to detect changes and avoid unnecessary rebuilds
+        self._last_ws_tuple: Tuple[str, ...] = ()
+        self._last_unix_tuple: Tuple[str, ...] = ()
         self._refresh_content()  # Initialize content
 
     def update_clients(self, ws_clients: int, unix_clients: int,
                       ws_addrs: Optional[List[str]] = None, unix_addrs: Optional[List[str]] = None) -> None:
-        """Update the client list display"""
-        self.clients_data["ws"] = ws_addrs if ws_addrs is not None else []
-        self.clients_data["unix"] = unix_addrs if unix_addrs is not None else []
+        """Update the client list display.
+
+        Only refreshes if the client list has actually changed to reduce
+        memory allocations and CPU usage.
+        """
+        new_ws = tuple(ws_addrs) if ws_addrs is not None else ()
+        new_unix = tuple(unix_addrs) if unix_addrs is not None else ()
+
+        # Only update if data has changed
+        if new_ws == self._last_ws_tuple and new_unix == self._last_unix_tuple:
+            return  # No changes, skip update
+
+        self._last_ws_tuple = new_ws
+        self._last_unix_tuple = new_unix
+        self.clients_data["ws"] = list(new_ws)
+        self.clients_data["unix"] = list(new_unix)
         self._refresh_content()
         self.refresh()  # Force widget redraw
 
@@ -227,23 +246,11 @@ class VeylorTUI(App):
         height: auto;
         layout: vertical;
     }
-
-    #log-container {
-        height: 10;
-        border: thick $warning;
-        margin: 1;
-        dock: bottom;
-    }
-
-    Log {
-        background: $surface-darken-1;
-    }
     """
 
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("d", "toggle_dark", "Toggle Dark Mode"),
-        ("c", "clear_logs", "Clear Logs"),
     ]
 
     def __init__(self, relay_instance=None, **kwargs):
@@ -260,9 +267,6 @@ class VeylorTUI(App):
                 # Source panels will be added dynamically in a grid
                 pass
 
-        with Container(id="log-container"):
-            yield Log(id="log-viewer", auto_scroll=True)
-
         yield Footer()
 
     def on_mount(self) -> None:
@@ -276,11 +280,6 @@ class VeylorTUI(App):
 
         # Start periodic update task
         self.update_task = self.set_interval(0.5, self._update_metrics)
-
-        # Display welcome message
-        log_widget = self.query_one("#log-viewer", Log)
-        log_widget.write_line("[bold green]Veylor TUI started[/]")
-        log_widget.write_line("[dim]Press 'q' to quit, 'c' to clear logs, 'd' to toggle dark mode[/]")
 
     def _initialize_source_panels(self) -> None:
         """Initialize metric panels for each source"""
@@ -368,11 +367,11 @@ class VeylorTUI(App):
                     ws_addrs,
                     unix_addrs
                 )
-            except (LookupError, AttributeError) as e:
+            except (LookupError, AttributeError):
                 pass
-            except Exception as e:
-                # Log unexpected errors to see what's happening
-                self.write_log(f"Error updating client list: {e}", "ERROR")
+            except Exception:
+                # Silently ignore unexpected errors in metrics update
+                pass
 
     def _format_duration(self, seconds: float) -> str:
         """Format duration in human-readable format"""
@@ -391,7 +390,7 @@ class VeylorTUI(App):
         """Format byte count in human-readable format"""
         if bytes_count < 1024:
             return f"{bytes_count} B"
-        elif bytes_count < 1024 * 1024:
+        elif bytes_count < 1024 * 1024:#3
             return f"{bytes_count / 1024:.2f} KB"
         elif bytes_count < 1024 * 1024 * 1024:
             return f"{bytes_count / (1024 * 1024):.2f} MB"
@@ -402,51 +401,7 @@ class VeylorTUI(App):
         """Toggle dark mode."""
         self.theme = "textual-light" if self.theme == "textual-dark" else "textual-dark"
 
-    def action_clear_logs(self) -> None:
-        """Clear the log viewer."""
-        log_widget = self.query_one("#log-viewer", Log)
-        log_widget.clear()
-        log_widget.write_line("[dim]Logs cleared[/]")
-
-    def write_log(self, message: str, level: str = "INFO") -> None:
-        """Write a log message to the log viewer"""
-        try:
-            log_widget = self.query_one("#log-viewer", Log)
-            timestamp = datetime.now().strftime("%H:%M:%S")
-
-            # Color code by level
-            if level == "ERROR":
-                color = "red"
-            elif level == "WARNING":
-                color = "yellow"
-            elif level == "DEBUG":
-                color = "dim"
-            else:
-                color = "white"
-
-            formatted_msg = f"{timestamp} [{level:8}] {message}"
-            log_widget.write_line(formatted_msg)
-        except (LookupError, AttributeError):
-            # Silently ignore if TUI widgets are not ready yet
-            pass
-
     def on_unmount(self) -> None:
         """Called when app is unmounted."""
         if self.update_task:
             self.update_task.stop()
-
-
-class TUILogHandler:
-    """Log handler that routes logs to the TUI"""
-
-    def __init__(self, tui_app: VeylorTUI):
-        self.tui_app = tui_app
-
-    def write(self, message: str, level: str = "INFO"):
-        """Write a log message to the TUI"""
-        if self.tui_app:
-            self.tui_app.write_log(message, level)
-
-    def flush(self):
-        """Flush is a no-op for TUI"""
-        pass
