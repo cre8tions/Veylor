@@ -12,7 +12,6 @@ import signal
 import sys
 import os
 import time
-import weakref
 import uvloop
 from typing import Set, Optional, Dict, Any, List
 from collections import deque
@@ -60,14 +59,14 @@ class SourceRelay:
             'messages_to_source': 0,
             'bytes_from_source': 0,
             'bytes_to_source': 0,
-            'message_timestamps': deque(maxlen=50000),  # Keep last 10000 message timestamps for rate calculation
+            'message_timestamps': deque(maxlen=35000),  # Keep last 10000 message timestamps for rate calculation
             'start_time': time.time(),
             'last_message_time': None,
             'source_connected_at': None,
             'source_latency': 0.0,  # Connection latency in seconds from websockets module
             # Extended metrics
-            'bytes_ts_from': deque(maxlen=50000),  # (timestamp, bytes) for throughput calc
-            'bytes_ts_to': deque(maxlen=50000),
+            'bytes_ts_from': deque(maxlen=5000),  # (timestamp, bytes) for throughput calc
+            'bytes_ts_to': deque(maxlen=5000),
             'peak_msg_rate': 0,
             'peak_throughput_in': 0,
             'peak_throughput_out': 0,
@@ -241,21 +240,23 @@ class SourceRelay:
                     break
 
                 # Read exact number of bytes for the message
-                message = b''
+                # Use bytearray to avoid O(n²) concatenation for large messages
+                buf = bytearray()
                 remaining = msg_len
                 while remaining > 0:
                     chunk = await reader.read(min(remaining, 8192))
                     if not chunk:
                         break
-                    message += chunk
+                    buf.extend(chunk)
                     remaining -= len(chunk)
 
                 # Verify we received complete message
-                if len(message) != msg_len:
-                    logger.error(f"Incomplete message from {peer}: expected {msg_len}, got {len(message)}")
+                if len(buf) != msg_len:
+                    logger.error(f"Incomplete message from {peer}: expected {msg_len}, got {len(buf)}")
                     break
 
                 # Forward message to source WebSocket
+                message = bytes(buf)
                 if self.source_connection:
                     try:
                         # Update metrics
@@ -415,17 +416,15 @@ class SourceRelay:
         now = time.time()
         uptime = now - self.metrics['start_time']
 
-        # Calculate messages per minute
-        recent_messages = [ts for ts in self.metrics['message_timestamps'] if now - ts < 60]
-        messages_per_minute = len(recent_messages)
+        # Calculate messages per minute (scan from newest, deque is chronologically ordered)
+        cutoff_60 = now - 60
+        messages_per_minute = sum(1 for ts in reversed(self.metrics['message_timestamps']) if ts >= cutoff_60)
 
-        # Calculate average message interval (time between consecutive messages)
+        # Calculate average message interval without copying the deque
         avg_latency = 0.0
-        if len(self.metrics['message_timestamps']) > 1:
-            timestamps = list(self.metrics['message_timestamps'])
-            latencies = [timestamps[i] - timestamps[i-1] for i in range(1, len(timestamps))]
-            if latencies:
-                avg_latency = sum(latencies) / len(latencies)
+        ts_deque = self.metrics['message_timestamps']
+        if len(ts_deque) > 1:
+            avg_latency = (ts_deque[-1] - ts_deque[0]) / (len(ts_deque) - 1)
 
         # Calculate source uptime
         source_uptime = 0.0
@@ -440,10 +439,11 @@ class SourceRelay:
         throughput_out = 0
         window = 5.0
 
-        # Ingress throughput
-        recent_bytes_in = [b for t, b in self.metrics['bytes_ts_from'] if now - t < window]
-        if recent_bytes_in:
-            throughput_in = sum(recent_bytes_in) / window
+        # Ingress throughput (scan from newest to avoid full-copy list comprehension)
+        cutoff_tp = now - window
+        total_bytes_in = sum(b for t, b in reversed(self.metrics['bytes_ts_from']) if t >= cutoff_tp)
+        if total_bytes_in:
+            throughput_in = total_bytes_in / window
 
         # Egress throughput (approximate by multiplying ingress by clients for broadcast + client msgs)
         # For more accuracy, we'd track per-client sends, but this is a good approximation for broadcast
@@ -451,9 +451,9 @@ class SourceRelay:
         throughput_out = throughput_in * total_clients
 
         # Add client-to-source throughput
-        recent_bytes_to = [b for t, b in self.metrics['bytes_ts_to'] if now - t < window]
-        if recent_bytes_to:
-            client_upload_rate = sum(recent_bytes_to) / window
+        total_bytes_to = sum(b for t, b in reversed(self.metrics['bytes_ts_to']) if t >= cutoff_tp)
+        if total_bytes_to:
+            client_upload_rate = total_bytes_to / window
             throughput_in += client_upload_rate # Client uploads are ingress to relay
             throughput_out += client_upload_rate # And egress to source
 
@@ -488,7 +488,7 @@ class SourceRelay:
             'peak_throughput_in': self.metrics['peak_throughput_in'],
             'max_msg_size': self.metrics['max_msg_size'],
             'avg_msg_size': avg_msg_size,
-            'errors': self.metrics['error_counts'],
+            'errors': dict(self.metrics['error_counts']),
             'pending_tasks': len(self._pending_tasks)  # For debugging task accumulation
         }
 
@@ -657,6 +657,7 @@ class WebSocketRelay:
         self.source_tasks = []
         self.running = True
         self.metrics_task = None
+        self.cleanup_task = None
         self.tui_mode = tui_mode  # Skip periodic metrics display when TUI is active
 
     async def run(self):
@@ -688,6 +689,9 @@ class WebSocketRelay:
                 logger.error("No valid sources configured. Exiting.")
                 return
 
+            # Start cleanup task (runs in both TUI and headless modes)
+            self.cleanup_task = asyncio.create_task(self._periodic_cleanup())
+
             # Start metrics display task only when TUI is not active
             # (TUI has its own real-time metrics display)
             if not self.tui_mode:
@@ -703,24 +707,28 @@ class WebSocketRelay:
         finally:
             await self.shutdown()
 
+    async def _periodic_cleanup(self):
+        """Periodically clean stale metric data to bound memory usage.
+
+        Runs in both TUI and headless modes to ensure deque entries
+        don't accumulate beyond the useful window.
+        """
+        try:
+            while self.running:
+                await asyncio.sleep(300)  # Every 5 minutes
+                total_cleaned = 0
+                for source_relay in self.source_relays:
+                    total_cleaned += source_relay.cleanup_stale_data(max_age_seconds=120.0)
+                if total_cleaned > 0:
+                    logger.debug(f"Cleaned up {total_cleaned} stale metric entries")
+        except asyncio.CancelledError:
+            pass
+
     async def display_metrics_periodically(self):
-        """Display metrics for all sources periodically and perform cleanup"""
-        cleanup_counter = 0
+        """Display metrics for all sources periodically"""
         try:
             while self.running:
                 await asyncio.sleep(60)  # Display every 60 seconds
-
-                # Perform stale data cleanup every 5 minutes (every 5th iteration)
-                cleanup_counter += 1
-                if cleanup_counter >= 5:
-                    cleanup_counter = 0
-                    total_cleaned = 0
-                    for source_relay in self.source_relays:
-                        total_cleaned += source_relay.cleanup_stale_data(max_age_seconds=120.0)
-                    if total_cleaned > 0:
-                        logger.debug(f"Cleaned up {total_cleaned} stale metric entries")
-
-                # Display metrics for all sources
                 self.display_metrics()
 
         except asyncio.CancelledError:
@@ -814,6 +822,10 @@ class WebSocketRelay:
         # Cancel metrics display task
         if self.metrics_task and not self.metrics_task.done():
             self.metrics_task.cancel()
+
+        # Cancel cleanup task
+        if self.cleanup_task and not self.cleanup_task.done():
+            self.cleanup_task.cancel()
 
         # First, set all source relays to stop running
         for source_relay in self.source_relays:
