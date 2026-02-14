@@ -6,11 +6,11 @@ Provides an attractive, real-time dashboard for monitoring relay metrics
 and connections without impacting WebSocket processing performance.
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal
 from textual.reactive import reactive
 
 
@@ -79,9 +79,9 @@ class SourceMetricsPanel(Static):
         )
 
         yield Horizontal(
-            MetricCard("Rate", "0", id=f"msg-rate-{self.source_idx}"),
+            MetricCard("Msg/s", "0", id=f"msg-rate-{self.source_idx}"),
             MetricCard("Interval", "0.000s", id=f"avg-interval-{self.source_idx}"),
-            MetricCard("Peak Rate", "0", id=f"peak-rate-{self.source_idx}"),
+            MetricCard("Peak/s", "0", id=f"peak-rate-{self.source_idx}"),
             classes="compact-row"
         )
 
@@ -113,7 +113,6 @@ class ClientList(Static):
     def __init__(self, source_idx: int, **kwargs):
         super().__init__(**kwargs)
         self.source_idx = source_idx
-        self.clients_data: Dict[str, List[str]] = {"ws": [], "unix": []}
         self.border_title = f"Connected Clients"
         self._content = ""
         # Track last state to detect changes and avoid unnecessary rebuilds
@@ -137,8 +136,6 @@ class ClientList(Static):
 
         self._last_ws_tuple = new_ws
         self._last_unix_tuple = new_unix
-        self.clients_data["ws"] = new_ws
-        self.clients_data["unix"] = new_unix
         self._refresh_content()
         self.refresh()  # Force widget redraw
 
@@ -146,13 +143,13 @@ class ClientList(Static):
         """Rebuild the client list content"""
         lines = []
 
-        total_ws = len(self.clients_data["ws"])
-        total_unix = len(self.clients_data["unix"])
+        ws_clients = self._last_ws_tuple
+        unix_clients = self._last_unix_tuple
 
         # WebSocket clients
-        lines.append(f"[bold cyan]WebSocket Clients ({total_ws}):[/]")
-        if self.clients_data["ws"]:
-            for addr in self.clients_data["ws"]:
+        lines.append(f"[bold cyan]WebSocket Clients ({len(ws_clients)}):[/]")
+        if ws_clients:
+            for addr in ws_clients:
                 lines.append(f"  🔌 {addr}")
         else:
             lines.append("  [dim](none)[/]")
@@ -160,9 +157,9 @@ class ClientList(Static):
         lines.append("")
 
         # Unix socket clients
-        lines.append(f"[bold cyan]Unix Socket Clients ({total_unix}):[/]")
-        if self.clients_data["unix"]:
-            for addr in self.clients_data["unix"]:
+        lines.append(f"[bold cyan]Unix Socket Clients ({len(unix_clients)}):[/]")
+        if unix_clients:
+            for addr in unix_clients:
                 lines.append(f"  🔌 {addr}")
         else:
             lines.append("  [dim](none)[/]")
@@ -195,7 +192,7 @@ class VeylorTUI(App):
 
     #metrics-container {
         height: auto;
-        # max-height: 60vh;
+        /* max-height: 60vh; */
         overflow-y: auto;
         padding: 0 1;
     }
@@ -234,10 +231,15 @@ class VeylorTUI(App):
         border: solid $accent;
         padding: 1;
         height: auto;
-        # max-height: 12;
+        /* max-height: 12; */
         margin-top: 1;
         overflow-y: auto;
         background: $surface-darken-1;
+    }
+
+    .error-highlight {
+        background: red;
+        color: white;
     }
 
     SourceMetricsPanel {
@@ -280,7 +282,7 @@ class VeylorTUI(App):
             self._initialize_source_panels()
 
         # Start periodic update task
-        self.update_task = self.set_interval(5, self._update_metrics)
+        self.update_task = self.set_interval(1, self._update_metrics)
 
     def _initialize_source_panels(self) -> None:
         """Initialize metric panels for each source"""
@@ -359,11 +361,11 @@ class VeylorTUI(App):
                 w['msg_to'].value = f"{metrics['messages_to_source']:,}"
                 w['data_from'].value = self._format_bytes(metrics['bytes_from_source'])
                 w['data_to'].value = self._format_bytes(metrics['bytes_to_source'])
-                w['msg_rate'].value = str(metrics['messages_per_minute'])
+                w['msg_rate'].value = f"{metrics['messages_per_second']:.1f}"
                 w['avg_interval'].value = f"{metrics['avg_message_interval']:.3f}s"
 
                 # Extended metrics
-                w['peak_rate'].value = str(metrics.get('peak_msg_rate', 0))
+                w['peak_rate'].value = f"{metrics.get('peak_msg_rate_per_sec', 0):.1f}"
                 w['in_rate'].value = self._format_bytes(int(metrics.get('throughput_in', 0))) + "/s"
                 w['out_rate'].value = self._format_bytes(int(metrics.get('throughput_out', 0))) + "/s"
                 w['peak_in'].value = self._format_bytes(int(metrics.get('peak_throughput_in', 0))) + "/s"
@@ -374,12 +376,7 @@ class VeylorTUI(App):
                 total_errors = sum(errors.values()) if errors else 0
                 error_card = w['errors']
                 error_card.value = str(total_errors)
-                if total_errors > 0:
-                     error_card.styles.background = "red"
-                     error_card.styles.color = "white"
-                else:
-                     error_card.styles.background = None
-                     error_card.styles.color = None
+                error_card.set_class(total_errors > 0, "error-highlight")
             except AttributeError:
                 pass
 
@@ -393,7 +390,7 @@ class VeylorTUI(App):
                     ws_addrs,
                     unix_addrs
                 )
-            except (AttributeError, Exception):
+            except Exception:
                 pass
 
     def _format_duration(self, seconds: float) -> str:
@@ -413,7 +410,7 @@ class VeylorTUI(App):
         """Format byte count in human-readable format"""
         if bytes_count < 1024:
             return f"{bytes_count} B"
-        elif bytes_count < 1024 * 1024:#3
+        elif bytes_count < 1024 * 1024:
             return f"{bytes_count / 1024:.2f} KB"
         elif bytes_count < 1024 * 1024 * 1024:
             return f"{bytes_count / (1024 * 1024):.2f} MB"
@@ -428,3 +425,6 @@ class VeylorTUI(App):
         """Called when app is unmounted."""
         if self.update_task:
             self.update_task.stop()
+            self.update_task = None
+        self._source_widgets.clear()
+        self.relay_instance = None
