@@ -292,6 +292,35 @@ class SourceRelay:
                 pass
             logger.info(f"Unix socket client disconnected: {peer}")
 
+    async def _disconnect_all_clients(self):
+        """Disconnect all downstream clients (WebSocket and Unix).
+
+        Called when the upstream source disconnects so clients don't
+        hang on a dead relay.
+        """
+        # Close WebSocket clients
+        ws_close_tasks = []
+        for client in self.ws_clients.copy():
+            try:
+                ws_close_tasks.append(asyncio.create_task(client.close()))
+            except Exception:
+                pass
+        if ws_close_tasks:
+            await asyncio.gather(*ws_close_tasks, return_exceptions=True)
+        self.ws_clients.clear()
+
+        # Close Unix socket clients
+        for writer in self.unix_clients.copy():
+            try:
+                if not writer.is_closing():
+                    writer.close()
+                await writer.wait_closed()
+            except (OSError, asyncio.CancelledError):
+                pass
+        self.unix_clients.clear()
+
+        logger.info(f"All clients disconnected for source {self.source_config.get('url', 'unknown')}")
+
     async def connect_to_source(self):
         """Connect to remote WebSocket source and relay messages"""
         url = self.source_config['url']
@@ -351,6 +380,7 @@ class SourceRelay:
                 # async with exited normally (graceful close) — clean up reference
                 self.source_connection = None
                 self.metrics['source_connected_at'] = None
+                await self._disconnect_all_clients()
 
             except asyncio.CancelledError:
                 logger.info(f"Source connection cancelled: {url}")
@@ -359,12 +389,14 @@ class SourceRelay:
                 logger.warning(f"Source connection closed for {url}: {e}")
                 self.source_connection = None
                 self.metrics['source_connected_at'] = None
+                await self._disconnect_all_clients()
                 if not self.running:
                     break
             except Exception as e:
                 logger.error(f"Error with source {url}: {e}")
                 self.source_connection = None
                 self.metrics['source_connected_at'] = None
+                await self._disconnect_all_clients()
                 if not self.running:
                     break
 
