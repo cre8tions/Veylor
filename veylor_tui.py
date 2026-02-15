@@ -96,6 +96,7 @@ class SourceMetricsPanel(Static):
             MetricCard("Avg Size", "0 B", id=f"avg-size-{self.source_idx}"),
             MetricCard("Max Size", "0 B", id=f"max-size-{self.source_idx}"),
             MetricCard("Errors", "0", id=f"errors-{self.source_idx}"),
+            MetricCard("Disconnects", "0", id=f"disconnects-{self.source_idx}"),
             classes="compact-row"
         )
 
@@ -319,6 +320,7 @@ class VeylorTUI(App):
             'avg_size': self.query_one(f"#avg-size-{idx}", MetricCard),
             'max_size': self.query_one(f"#max-size-{idx}", MetricCard),
             'errors': self.query_one(f"#errors-{idx}", MetricCard),
+            'disconnects': self.query_one(f"#disconnects-{idx}", MetricCard),
             'client_list': self.query_one(f"#client-list-{idx}", ClientList),
         }
         self._source_widgets[idx] = widgets
@@ -377,6 +379,11 @@ class VeylorTUI(App):
                 error_card = w['errors']
                 error_card.value = str(total_errors)
                 error_card.set_class(total_errors > 0, "error-highlight")
+
+                disconnects = errors.get('source_disconnects', 0)
+                dc_card = w['disconnects']
+                dc_card.value = str(disconnects)
+                dc_card.set_class(disconnects > 0, "error-highlight")
             except AttributeError:
                 pass
 

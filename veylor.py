@@ -81,7 +81,8 @@ class SourceRelay:
             'error_counts': {
                 'connection_errors': 0,
                 'send_errors': 0,
-                'dropped_messages': 0
+                'dropped_messages': 0,
+                'source_disconnects': 0
             }
         }
 
@@ -380,6 +381,7 @@ class SourceRelay:
                 # async with exited normally (graceful close) — clean up reference
                 self.source_connection = None
                 self.metrics['source_connected_at'] = None
+                self.metrics['error_counts']['source_disconnects'] += 1
                 await self._disconnect_all_clients()
 
             except asyncio.CancelledError:
@@ -389,6 +391,7 @@ class SourceRelay:
                 logger.warning(f"Source connection closed for {url}: {e}")
                 self.source_connection = None
                 self.metrics['source_connected_at'] = None
+                self.metrics['error_counts']['source_disconnects'] += 1
                 await self._disconnect_all_clients()
                 if not self.running:
                     break
@@ -396,6 +399,7 @@ class SourceRelay:
                 logger.error(f"Error with source {url}: {e}")
                 self.source_connection = None
                 self.metrics['source_connected_at'] = None
+                self.metrics['error_counts']['source_disconnects'] += 1
                 await self._disconnect_all_clients()
                 if not self.running:
                     break
