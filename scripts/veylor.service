@@ -1,5 +1,5 @@
 [Unit]
-Description=Veyllor Websocket Reflector
+Description=Veylor Websocket Reflector
 After=network.target
 
 [Service]

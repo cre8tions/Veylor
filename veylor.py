@@ -12,13 +12,13 @@ import signal
 import sys
 import os
 import time
-import weakref
 import uvloop
 from typing import Set, Optional, Dict, Any, List
 from collections import deque
 import websockets
-from websockets.asyncio.server import serve as ws_serve
+from websockets.asyncio.server import serve as ws_serve, broadcast as ws_broadcast
 from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, ConnectionClosedError
 import yaml
 import argparse
 
@@ -51,8 +51,11 @@ class SourceRelay:
         self.source_connection = None
         self.servers = []
 
-        # Track pending broadcast tasks to prevent memory leaks from fire-and-forget patterns
+        # Track pending Unix broadcast tasks to prevent memory leaks
         self._pending_tasks: Set[asyncio.Task] = set()
+
+        # Track Unix clients pending removal (detected dead during broadcast)
+        self._dead_unix_writers: Set[asyncio.StreamWriter] = set()
 
         # Metrics tracking
         self.metrics = {
@@ -60,15 +63,15 @@ class SourceRelay:
             'messages_to_source': 0,
             'bytes_from_source': 0,
             'bytes_to_source': 0,
-            'message_timestamps': deque(maxlen=50000),  # Keep last 10000 message timestamps for rate calculation
+            'message_timestamps': deque(maxlen=100000),  # ~150 sec at 666 msg/sec (40k/min) for rate calculation
             'start_time': time.time(),
             'last_message_time': None,
             'source_connected_at': None,
             'source_latency': 0.0,  # Connection latency in seconds from websockets module
             # Extended metrics
-            'bytes_ts_from': deque(maxlen=50000),  # (timestamp, bytes) for throughput calc
-            'bytes_ts_to': deque(maxlen=50000),
-            'peak_msg_rate': 0,
+            'bytes_ts_from': deque(maxlen=5000),  # (timestamp, bytes) for throughput calc
+            'bytes_ts_to': deque(maxlen=5000),
+            'peak_msg_rate_per_sec': 0,
             'peak_throughput_in': 0,
             'peak_throughput_out': 0,
             'min_msg_size': 0,  # Will be set on first message
@@ -78,7 +81,8 @@ class SourceRelay:
             'error_counts': {
                 'connection_errors': 0,
                 'send_errors': 0,
-                'dropped_messages': 0
+                'dropped_messages': 0,
+                'source_disconnects': 0
             }
         }
 
@@ -98,10 +102,10 @@ class SourceRelay:
         # Update min_msg_size (0 means not yet set)
         if self.metrics['min_msg_size'] == 0 or msg_len < self.metrics['min_msg_size']:
             self.metrics['min_msg_size'] = msg_len
-        self.metrics['max_msg_size'] = max(self.metrics['max_msg_size'], msg_len)
+        if msg_len > self.metrics['max_msg_size']:
+            self.metrics['max_msg_size'] = msg_len
 
         # Use rolling average calculation to prevent unbounded growth
-        # Keep a window of last N messages for average calculation
         self.metrics['msg_count_for_avg'] += 1
         # Exponential moving average to prevent unbounded accumulation
         alpha = 0.01  # Smoothing factor for EMA
@@ -110,36 +114,31 @@ class SourceRelay:
         else:
             self.metrics['total_msg_size'] = (1 - alpha) * self.metrics['total_msg_size'] + alpha * msg_len
 
-        # Broadcast to WebSocket clients (concurrent, non-blocking)
+        # Broadcast to WebSocket clients using optimized built-in broadcast.
+        # broadcast() pushes synchronously, skips closed connections, and creates
+        # zero tasks — dramatically reducing memory allocation per message.
         if self.ws_clients:
-            ws_tasks = []
-            for client in self.ws_clients.copy():
-                try:
-                    ws_tasks.append(asyncio.create_task(client.send(message)))
-                except Exception as e:
-                    logger.error(f"Error queuing WebSocket message: {e}")
-                    self.metrics['error_counts']['send_errors'] += 1
-                    self.ws_clients.discard(client)
+            try:
+                ws_broadcast(self.ws_clients, message)
+            except Exception as e:
+                logger.debug(f"WebSocket broadcast error: {e}")
+                self.metrics['error_counts']['send_errors'] += 1
 
-            # Don't await here - let tasks run concurrently
-            # Track task to prevent memory leak from fire-and-forget pattern
-            if ws_tasks:
-                task = asyncio.create_task(self._wait_ws_sends(ws_tasks))
-                self._track_task(task)
+        # Purge any dead Unix writers detected during previous broadcasts
+        if self._dead_unix_writers:
+            self.unix_clients -= self._dead_unix_writers
+            self._dead_unix_writers.clear()
 
         # Broadcast to Unix socket clients (concurrent, non-blocking)
         if self.unix_clients:
             unix_tasks = []
             for writer in self.unix_clients.copy():
-                try:
-                    # Queue the send/drain as a task to avoid blocking
-                    unix_tasks.append(asyncio.create_task(self._send_unix_message(writer, message)))
-                except Exception as e:
-                    logger.error(f"Error queuing Unix socket message: {e}")
-                    self.unix_clients.discard(writer)
+                if writer.is_closing():
+                    self._dead_unix_writers.add(writer)
+                    continue
+                unix_tasks.append(asyncio.create_task(self._send_unix_message(writer, message)))
 
-            # Don't await here - let tasks run concurrently
-            # Track task to prevent memory leak from fire-and-forget pattern
+            # Track gather task to prevent memory leak from fire-and-forget
             if unix_tasks:
                 task = asyncio.create_task(self._wait_unix_sends(unix_tasks))
                 self._track_task(task)
@@ -149,21 +148,13 @@ class SourceRelay:
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
 
-    async def _wait_ws_sends(self, tasks):
-        """Wait for WebSocket sends to complete"""
+    async def _wait_unix_sends(self, tasks):
+        """Wait for Unix socket sends to complete"""
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
                 if isinstance(result, Exception):
                     self.metrics['error_counts']['send_errors'] += 1
-                    logger.debug(f"WebSocket send error: {result}")
-        except Exception as e:
-            logger.debug(f"Error in _wait_ws_sends: {e}")
-
-    async def _wait_unix_sends(self, tasks):
-        """Wait for Unix socket sends to complete"""
-        try:
-            await asyncio.gather(*tasks, return_exceptions=True)
         except Exception:
             pass
 
@@ -174,16 +165,26 @@ class SourceRelay:
             writer.write(msg_len.to_bytes(4, byteorder='big'))
             writer.write(message)
             await writer.drain()
-        except Exception as e:
-            logger.error(f"Error sending to Unix socket client: {e}")
-            self.unix_clients.discard(writer)
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            # Connection reset by peer / broken pipe — client disconnected.
+            # Log at debug level to avoid flooding logs on expected disconnects.
+            logger.debug(f"Unix socket client disconnected during send: {e}")
+            self._dead_unix_writers.add(writer)
             try:
                 writer.close()
                 await writer.wait_closed()
-            except:
+            except (OSError, asyncio.CancelledError):
+                pass
+        except Exception as e:
+            logger.warning(f"Unexpected error sending to Unix socket client: {e}")
+            self._dead_unix_writers.add(writer)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except (OSError, asyncio.CancelledError):
                 pass
 
-    async def handle_websocket_client(self, websocket, path=None):
+    async def handle_websocket_client(self, websocket):
         """Handle incoming WebSocket client connection"""
         self.ws_clients.add(websocket)
         client_addr = websocket.remote_address
@@ -209,6 +210,10 @@ class SourceRelay:
                         logger.error(f"Error forwarding message to source: {e}")
                 else:
                     logger.warning(f"Cannot forward message from {client_addr}: no source connection")
+        except ConnectionClosedOK:
+            pass  # Normal close, no error to log
+        except ConnectionClosedError as e:
+            logger.debug(f"WebSocket client connection closed with error: {client_addr}: {e}")
         except Exception as e:
             logger.error(f"WebSocket client error: {e}")
         finally:
@@ -241,21 +246,23 @@ class SourceRelay:
                     break
 
                 # Read exact number of bytes for the message
-                message = b''
+                # Use bytearray to avoid O(n²) concatenation for large messages
+                buf = bytearray()
                 remaining = msg_len
                 while remaining > 0:
                     chunk = await reader.read(min(remaining, 8192))
                     if not chunk:
                         break
-                    message += chunk
+                    buf.extend(chunk)
                     remaining -= len(chunk)
 
                 # Verify we received complete message
-                if len(message) != msg_len:
-                    logger.error(f"Incomplete message from {peer}: expected {msg_len}, got {len(message)}")
+                if len(buf) != msg_len:
+                    logger.error(f"Incomplete message from {peer}: expected {msg_len}, got {len(buf)}")
                     break
 
                 # Forward message to source WebSocket
+                message = bytes(buf)
                 if self.source_connection:
                     try:
                         # Update metrics
@@ -271,16 +278,49 @@ class SourceRelay:
                         logger.error(f"Error forwarding message to source: {e}")
                 else:
                     logger.warning(f"Cannot forward message from {peer}: no source connection")
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            logger.debug(f"Unix socket client connection lost: {peer}: {e}")
         except Exception as e:
             logger.error(f"Unix socket client error: {e}")
         finally:
             self.unix_clients.discard(writer)
+            self._dead_unix_writers.discard(writer)
             try:
-                writer.close()
+                if not writer.is_closing():
+                    writer.close()
                 await writer.wait_closed()
-            except:
+            except (OSError, asyncio.CancelledError):
                 pass
             logger.info(f"Unix socket client disconnected: {peer}")
+
+    async def _disconnect_all_clients(self):
+        """Disconnect all downstream clients (WebSocket and Unix).
+
+        Called when the upstream source disconnects so clients don't
+        hang on a dead relay.
+        """
+        # Close WebSocket clients
+        ws_close_tasks = []
+        for client in self.ws_clients.copy():
+            try:
+                ws_close_tasks.append(asyncio.create_task(client.close()))
+            except Exception:
+                pass
+        if ws_close_tasks:
+            await asyncio.gather(*ws_close_tasks, return_exceptions=True)
+        self.ws_clients.clear()
+
+        # Close Unix socket clients
+        for writer in self.unix_clients.copy():
+            try:
+                if not writer.is_closing():
+                    writer.close()
+                await writer.wait_closed()
+            except (OSError, asyncio.CancelledError):
+                pass
+        self.unix_clients.clear()
+
+        logger.info(f"All clients disconnected for source {self.source_config.get('url', 'unknown')}")
 
     async def connect_to_source(self):
         """Connect to remote WebSocket source and relay messages"""
@@ -338,11 +378,29 @@ class SourceRelay:
                         # Broadcast to all clients (non-blocking)
                         await self.broadcast_message(message)
 
+                # async with exited normally (graceful close) — clean up reference
+                self.source_connection = None
+                self.metrics['source_connected_at'] = None
+                self.metrics['error_counts']['source_disconnects'] += 1
+                await self._disconnect_all_clients()
+
             except asyncio.CancelledError:
                 logger.info(f"Source connection cancelled: {url}")
                 break
+            except ConnectionClosed as e:
+                logger.warning(f"Source connection closed for {url}: {e}")
+                self.source_connection = None
+                self.metrics['source_connected_at'] = None
+                self.metrics['error_counts']['source_disconnects'] += 1
+                await self._disconnect_all_clients()
+                if not self.running:
+                    break
             except Exception as e:
                 logger.error(f"Error with source {url}: {e}")
+                self.source_connection = None
+                self.metrics['source_connected_at'] = None
+                self.metrics['error_counts']['source_disconnects'] += 1
+                await self._disconnect_all_clients()
                 if not self.running:
                     break
 
@@ -415,17 +473,15 @@ class SourceRelay:
         now = time.time()
         uptime = now - self.metrics['start_time']
 
-        # Calculate messages per minute
-        recent_messages = [ts for ts in self.metrics['message_timestamps'] if now - ts < 60]
-        messages_per_minute = len(recent_messages)
+        # Calculate messages per second (5-second rolling average for smoothness)
+        cutoff_5 = now - 5
+        messages_per_second = sum(1 for ts in reversed(self.metrics['message_timestamps']) if ts >= cutoff_5) / 5.0
 
-        # Calculate average message interval (time between consecutive messages)
+        # Calculate average message interval without copying the deque
         avg_latency = 0.0
-        if len(self.metrics['message_timestamps']) > 1:
-            timestamps = list(self.metrics['message_timestamps'])
-            latencies = [timestamps[i] - timestamps[i-1] for i in range(1, len(timestamps))]
-            if latencies:
-                avg_latency = sum(latencies) / len(latencies)
+        ts_deque = self.metrics['message_timestamps']
+        if len(ts_deque) > 1:
+            avg_latency = (ts_deque[-1] - ts_deque[0]) / (len(ts_deque) - 1)
 
         # Calculate source uptime
         source_uptime = 0.0
@@ -440,10 +496,11 @@ class SourceRelay:
         throughput_out = 0
         window = 5.0
 
-        # Ingress throughput
-        recent_bytes_in = [b for t, b in self.metrics['bytes_ts_from'] if now - t < window]
-        if recent_bytes_in:
-            throughput_in = sum(recent_bytes_in) / window
+        # Ingress throughput (scan from newest to avoid full-copy list comprehension)
+        cutoff_tp = now - window
+        total_bytes_in = sum(b for t, b in reversed(self.metrics['bytes_ts_from']) if t >= cutoff_tp)
+        if total_bytes_in:
+            throughput_in = total_bytes_in / window
 
         # Egress throughput (approximate by multiplying ingress by clients for broadcast + client msgs)
         # For more accuracy, we'd track per-client sends, but this is a good approximation for broadcast
@@ -451,14 +508,14 @@ class SourceRelay:
         throughput_out = throughput_in * total_clients
 
         # Add client-to-source throughput
-        recent_bytes_to = [b for t, b in self.metrics['bytes_ts_to'] if now - t < window]
-        if recent_bytes_to:
-            client_upload_rate = sum(recent_bytes_to) / window
+        total_bytes_to = sum(b for t, b in reversed(self.metrics['bytes_ts_to']) if t >= cutoff_tp)
+        if total_bytes_to:
+            client_upload_rate = total_bytes_to / window
             throughput_in += client_upload_rate # Client uploads are ingress to relay
             throughput_out += client_upload_rate # And egress to source
 
         # Update peaks
-        self.metrics['peak_msg_rate'] = max(self.metrics['peak_msg_rate'], messages_per_minute)
+        self.metrics['peak_msg_rate_per_sec'] = max(self.metrics['peak_msg_rate_per_sec'], messages_per_second)
         self.metrics['peak_throughput_in'] = max(self.metrics['peak_throughput_in'], throughput_in)
         self.metrics['peak_throughput_out'] = max(self.metrics['peak_throughput_out'], throughput_out)
 
@@ -477,18 +534,18 @@ class SourceRelay:
             'messages_to_source': self.metrics['messages_to_source'],
             'bytes_from_source': self.metrics['bytes_from_source'],
             'bytes_to_source': self.metrics['bytes_to_source'],
-            'messages_per_minute': messages_per_minute,
+            'messages_per_second': messages_per_second,
             'avg_message_interval': avg_latency,
             'ws_client_addrs': ws_addrs,
             'unix_client_addrs': unix_addrs,
             # Enhanced metrics
             'throughput_in': throughput_in,
             'throughput_out': throughput_out,
-            'peak_msg_rate': self.metrics['peak_msg_rate'],
+            'peak_msg_rate_per_sec': self.metrics['peak_msg_rate_per_sec'],
             'peak_throughput_in': self.metrics['peak_throughput_in'],
             'max_msg_size': self.metrics['max_msg_size'],
             'avg_msg_size': avg_msg_size,
-            'errors': self.metrics['error_counts'],
+            'errors': dict(self.metrics['error_counts']),
             'pending_tasks': len(self._pending_tasks)  # For debugging task accumulation
         }
 
@@ -504,7 +561,7 @@ class SourceRelay:
         old_peaks = {}
         if preserve_peaks:
             old_peaks = {
-                'peak_msg_rate': self.metrics['peak_msg_rate'],
+                'peak_msg_rate_per_sec': self.metrics['peak_msg_rate_per_sec'],
                 'peak_throughput_in': self.metrics['peak_throughput_in'],
                 'peak_throughput_out': self.metrics['peak_throughput_out'],
             }
@@ -532,7 +589,7 @@ class SourceRelay:
 
         # Reset peaks if not preserving
         if not preserve_peaks:
-            self.metrics['peak_msg_rate'] = 0
+            self.metrics['peak_msg_rate_per_sec'] = 0
             self.metrics['peak_throughput_in'] = 0
             self.metrics['peak_throughput_out'] = 0
         else:
@@ -602,20 +659,23 @@ class SourceRelay:
 
         # Cancel and await all pending broadcast tasks to prevent leaks
         if self._pending_tasks:
-            for task in self._pending_tasks.copy():
-                if not task.done():
-                    task.cancel()
-            # Wait for all pending tasks to complete/cancel
-            if self._pending_tasks:
-                await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+            pending = [t for t in self._pending_tasks if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             self._pending_tasks.clear()
+
+        # Clear dead writers set
+        self._dead_unix_writers.clear()
 
         # Close source connection to break out of receive loop
         if self.source_connection:
             try:
                 await self.source_connection.close()
-            except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
+            except (ConnectionClosed, asyncio.CancelledError, OSError):
                 pass
+            self.source_connection = None
 
         # Close all WebSocket clients
         ws_close_tasks = []
@@ -623,14 +683,17 @@ class SourceRelay:
             ws_close_tasks.append(asyncio.create_task(client.close()))
         if ws_close_tasks:
             await asyncio.gather(*ws_close_tasks, return_exceptions=True)
+        self.ws_clients.clear()
 
         # Close all Unix socket clients
         for writer in self.unix_clients.copy():
             try:
-                writer.close()
+                if not writer.is_closing():
+                    writer.close()
                 await writer.wait_closed()
             except (OSError, asyncio.CancelledError):
                 pass
+        self.unix_clients.clear()
 
         # Close servers
         for server in self.servers:
@@ -657,6 +720,7 @@ class WebSocketRelay:
         self.source_tasks = []
         self.running = True
         self.metrics_task = None
+        self.cleanup_task = None
         self.tui_mode = tui_mode  # Skip periodic metrics display when TUI is active
 
     async def run(self):
@@ -688,6 +752,9 @@ class WebSocketRelay:
                 logger.error("No valid sources configured. Exiting.")
                 return
 
+            # Start cleanup task (runs in both TUI and headless modes)
+            self.cleanup_task = asyncio.create_task(self._periodic_cleanup())
+
             # Start metrics display task only when TUI is not active
             # (TUI has its own real-time metrics display)
             if not self.tui_mode:
@@ -703,24 +770,28 @@ class WebSocketRelay:
         finally:
             await self.shutdown()
 
+    async def _periodic_cleanup(self):
+        """Periodically clean stale metric data to bound memory usage.
+
+        Runs in both TUI and headless modes to ensure deque entries
+        don't accumulate beyond the useful window.
+        """
+        try:
+            while self.running:
+                await asyncio.sleep(300)  # Every 5 minutes
+                total_cleaned = 0
+                for source_relay in self.source_relays:
+                    total_cleaned += source_relay.cleanup_stale_data(max_age_seconds=120.0)
+                if total_cleaned > 0:
+                    logger.debug(f"Cleaned up {total_cleaned} stale metric entries")
+        except asyncio.CancelledError:
+            pass
+
     async def display_metrics_periodically(self):
-        """Display metrics for all sources periodically and perform cleanup"""
-        cleanup_counter = 0
+        """Display metrics for all sources periodically"""
         try:
             while self.running:
                 await asyncio.sleep(60)  # Display every 60 seconds
-
-                # Perform stale data cleanup every 5 minutes (every 5th iteration)
-                cleanup_counter += 1
-                if cleanup_counter >= 5:
-                    cleanup_counter = 0
-                    total_cleaned = 0
-                    for source_relay in self.source_relays:
-                        total_cleaned += source_relay.cleanup_stale_data(max_age_seconds=120.0)
-                    if total_cleaned > 0:
-                        logger.debug(f"Cleaned up {total_cleaned} stale metric entries")
-
-                # Display metrics for all sources
                 self.display_metrics()
 
         except asyncio.CancelledError:
@@ -815,6 +886,10 @@ class WebSocketRelay:
         if self.metrics_task and not self.metrics_task.done():
             self.metrics_task.cancel()
 
+        # Cancel cleanup task
+        if self.cleanup_task and not self.cleanup_task.done():
+            self.cleanup_task.cancel()
+
         # First, set all source relays to stop running
         for source_relay in self.source_relays:
             source_relay.running = False
@@ -822,8 +897,9 @@ class WebSocketRelay:
             if source_relay.source_connection:
                 try:
                     await source_relay.source_connection.close()
-                except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
+                except (ConnectionClosed, asyncio.CancelledError, OSError):
                     pass
+                source_relay.source_connection = None
 
         # Cancel all running tasks
         for task in self.source_tasks:

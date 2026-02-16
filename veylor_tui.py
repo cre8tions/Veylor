@@ -6,11 +6,11 @@ Provides an attractive, real-time dashboard for monitoring relay metrics
 and connections without impacting WebSocket processing performance.
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal
 from textual.reactive import reactive
 
 
@@ -26,7 +26,7 @@ class MetricCard(Static):
         self.value = value
 
     def render(self) -> str:
-        return f"[bold cyan]{self.label}[/]\n[yellow]{self.value}[/]"
+        return f"[bold]{self.label}[/]\n[bold]{self.value}[/]"
 
 
 class ConnectionStatus(Static):
@@ -79,9 +79,9 @@ class SourceMetricsPanel(Static):
         )
 
         yield Horizontal(
-            MetricCard("Rate", "0", id=f"msg-rate-{self.source_idx}"),
+            MetricCard("Msg/s", "0", id=f"msg-rate-{self.source_idx}"),
             MetricCard("Interval", "0.000s", id=f"avg-interval-{self.source_idx}"),
-            MetricCard("Peak Rate", "0", id=f"peak-rate-{self.source_idx}"),
+            MetricCard("Peak/s", "0", id=f"peak-rate-{self.source_idx}"),
             classes="compact-row"
         )
 
@@ -96,6 +96,7 @@ class SourceMetricsPanel(Static):
             MetricCard("Avg Size", "0 B", id=f"avg-size-{self.source_idx}"),
             MetricCard("Max Size", "0 B", id=f"max-size-{self.source_idx}"),
             MetricCard("Errors", "0", id=f"errors-{self.source_idx}"),
+            MetricCard("Disconnects", "0", id=f"disconnects-{self.source_idx}"),
             classes="compact-row"
         )
 
@@ -113,7 +114,6 @@ class ClientList(Static):
     def __init__(self, source_idx: int, **kwargs):
         super().__init__(**kwargs)
         self.source_idx = source_idx
-        self.clients_data: Dict[str, List[str]] = {"ws": [], "unix": []}
         self.border_title = f"Connected Clients"
         self._content = ""
         # Track last state to detect changes and avoid unnecessary rebuilds
@@ -137,8 +137,6 @@ class ClientList(Static):
 
         self._last_ws_tuple = new_ws
         self._last_unix_tuple = new_unix
-        self.clients_data["ws"] = list(new_ws)
-        self.clients_data["unix"] = list(new_unix)
         self._refresh_content()
         self.refresh()  # Force widget redraw
 
@@ -146,13 +144,13 @@ class ClientList(Static):
         """Rebuild the client list content"""
         lines = []
 
-        total_ws = len(self.clients_data["ws"])
-        total_unix = len(self.clients_data["unix"])
+        ws_clients = self._last_ws_tuple
+        unix_clients = self._last_unix_tuple
 
         # WebSocket clients
-        lines.append(f"[bold cyan]WebSocket Clients ({total_ws}):[/]")
-        if self.clients_data["ws"]:
-            for addr in self.clients_data["ws"]:
+        lines.append(f"[bold cyan]WebSocket Clients ({len(ws_clients)}):[/]")
+        if ws_clients:
+            for addr in ws_clients:
                 lines.append(f"  🔌 {addr}")
         else:
             lines.append("  [dim](none)[/]")
@@ -160,9 +158,9 @@ class ClientList(Static):
         lines.append("")
 
         # Unix socket clients
-        lines.append(f"[bold cyan]Unix Socket Clients ({total_unix}):[/]")
-        if self.clients_data["unix"]:
-            for addr in self.clients_data["unix"]:
+        lines.append(f"[bold cyan]Unix Socket Clients ({len(unix_clients)}):[/]")
+        if unix_clients:
+            for addr in unix_clients:
                 lines.append(f"  🔌 {addr}")
         else:
             lines.append("  [dim](none)[/]")
@@ -195,7 +193,6 @@ class VeylorTUI(App):
 
     #metrics-container {
         height: auto;
-        # max-height: 60vh;
         overflow-y: auto;
         padding: 0 1;
     }
@@ -219,6 +216,8 @@ class VeylorTUI(App):
         margin-right: 1;
         height: 4;
         width: 1fr;
+        color: $text;
+        background: $surface;
     }
 
     ConnectionStatus {
@@ -227,17 +226,23 @@ class VeylorTUI(App):
         height: 5;
         width: 100%;
         margin-bottom: 1;
-        tint: white 15%;
+        color: $text;
+        background: $boost;
     }
 
     ClientList {
         border: solid $accent;
         padding: 1;
         height: auto;
-        # max-height: 12;
         margin-top: 1;
         overflow-y: auto;
+        color: $text;
         background: $surface-darken-1;
+    }
+
+    .error-highlight {
+        background: $error;
+        color: $text;
     }
 
     SourceMetricsPanel {
@@ -257,6 +262,7 @@ class VeylorTUI(App):
         super().__init__(**kwargs)
         self.relay_instance = relay_instance
         self.update_task = None
+        self._source_widgets: Dict[int, Dict] = {}  # Cached widget references per source
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -279,7 +285,7 @@ class VeylorTUI(App):
             self._initialize_source_panels()
 
         # Start periodic update task
-        self.update_task = self.set_interval(0.5, self._update_metrics)
+        self.update_task = self.set_interval(1, self._update_metrics)
 
     def _initialize_source_panels(self) -> None:
         """Initialize metric panels for each source"""
@@ -292,6 +298,36 @@ class VeylorTUI(App):
             panel = SourceMetricsPanel(idx)
             container.mount(panel)
 
+    def _get_source_widgets(self, idx: int) -> Dict:
+        """Get cached widget references for a source, populating on first call."""
+        widgets = self._source_widgets.get(idx)
+        if widgets is not None:
+            return widgets
+        widgets = {
+            'conn_status': self.query_one(f"#conn-status-{idx}", ConnectionStatus),
+            'clients': self.query_one(f"#clients-{idx}", MetricCard),
+            'ws_clients': self.query_one(f"#ws-clients-{idx}", MetricCard),
+            'unix_clients': self.query_one(f"#unix-clients-{idx}", MetricCard),
+            'latency': self.query_one(f"#latency-{idx}", MetricCard),
+            'msg_from': self.query_one(f"#msg-from-{idx}", MetricCard),
+            'msg_to': self.query_one(f"#msg-to-{idx}", MetricCard),
+            'data_from': self.query_one(f"#data-from-{idx}", MetricCard),
+            'data_to': self.query_one(f"#data-to-{idx}", MetricCard),
+            'msg_rate': self.query_one(f"#msg-rate-{idx}", MetricCard),
+            'avg_interval': self.query_one(f"#avg-interval-{idx}", MetricCard),
+            'peak_rate': self.query_one(f"#peak-rate-{idx}", MetricCard),
+            'in_rate': self.query_one(f"#in-rate-{idx}", MetricCard),
+            'out_rate': self.query_one(f"#out-rate-{idx}", MetricCard),
+            'peak_in': self.query_one(f"#peak-in-{idx}", MetricCard),
+            'avg_size': self.query_one(f"#avg-size-{idx}", MetricCard),
+            'max_size': self.query_one(f"#max-size-{idx}", MetricCard),
+            'errors': self.query_one(f"#errors-{idx}", MetricCard),
+            'disconnects': self.query_one(f"#disconnects-{idx}", MetricCard),
+            'client_list': self.query_one(f"#client-list-{idx}", ClientList),
+        }
+        self._source_widgets[idx] = widgets
+        return widgets
+
     def _update_metrics(self) -> None:
         """Update metrics display from relay instance"""
         if not self.relay_instance:
@@ -301,76 +337,69 @@ class VeylorTUI(App):
             metrics = source_relay.get_metrics_summary()
             source_url = source_relay.source_config.get('url', 'unknown')
 
+            try:
+                w = self._get_source_widgets(idx)
+            except LookupError:
+                continue  # Widgets not yet mounted
+
             # Update connection status
             try:
-                conn_status = self.query_one(f"#conn-status-{idx}", ConnectionStatus)
+                conn_status = w['conn_status']
                 if metrics['source_connected']:
                     conn_status.status = "🟢 Connected"
-
                 else:
                     conn_status.status = "🔴 Disconnected"
                 conn_status.url = source_url[:40] + "..." if len(source_url) > 40 else source_url
                 conn_status.uptime = self._format_duration(metrics['source_uptime']) if metrics['source_connected'] else "N/A"
-            except (LookupError, AttributeError):
+            except AttributeError:
                 pass
 
             # Update metric cards
             try:
-                self.query_one(f"#clients-{idx}", MetricCard).value = str(metrics['total_clients'])
-                self.query_one(f"#ws-clients-{idx}", MetricCard).value = str(metrics['ws_clients'])
-                self.query_one(f"#unix-clients-{idx}", MetricCard).value = str(metrics['unix_clients'])
-                # Convert latency from seconds to milliseconds for display
+                w['clients'].value = str(metrics['total_clients'])
+                w['ws_clients'].value = str(metrics['ws_clients'])
+                w['unix_clients'].value = str(metrics['unix_clients'])
                 latency_ms = metrics.get('source_latency', 0) * 1000
-                self.query_one(f"#latency-{idx}", MetricCard).value = f"{latency_ms:.2f}ms"
-                self.query_one(f"#msg-from-{idx}", MetricCard).value = f"{metrics['messages_from_source']:,}"
-                self.query_one(f"#msg-to-{idx}", MetricCard).value = f"{metrics['messages_to_source']:,}"
-                self.query_one(f"#data-from-{idx}", MetricCard).value = self._format_bytes(metrics['bytes_from_source'])
-                self.query_one(f"#data-to-{idx}", MetricCard).value = self._format_bytes(metrics['bytes_to_source'])
-                self.query_one(f"#msg-rate-{idx}", MetricCard).value = str(metrics['messages_per_minute'])
-                self.query_one(f"#avg-interval-{idx}", MetricCard).value = f"{metrics['avg_message_interval']:.3f}s"
+                w['latency'].value = f"{latency_ms:.2f}ms"
+                w['msg_from'].value = f"{metrics['messages_from_source']:,}"
+                w['msg_to'].value = f"{metrics['messages_to_source']:,}"
+                w['data_from'].value = self._format_bytes(metrics['bytes_from_source'])
+                w['data_to'].value = self._format_bytes(metrics['bytes_to_source'])
+                w['msg_rate'].value = f"{metrics['messages_per_second']:.1f}"
+                w['avg_interval'].value = f"{metrics['avg_message_interval']:.3f}s"
 
                 # Extended metrics
-                self.query_one(f"#peak-rate-{idx}", MetricCard).value = str(metrics.get('peak_msg_rate', 0))
-
-                in_rate = self._format_bytes(int(metrics.get('throughput_in', 0))) + "/s"
-                out_rate = self._format_bytes(int(metrics.get('throughput_out', 0))) + "/s"
-                peak_in = self._format_bytes(int(metrics.get('peak_throughput_in', 0))) + "/s"
-
-                self.query_one(f"#in-rate-{idx}", MetricCard).value = in_rate
-                self.query_one(f"#out-rate-{idx}", MetricCard).value = out_rate
-                self.query_one(f"#peak-in-{idx}", MetricCard).value = peak_in
-
-                self.query_one(f"#avg-size-{idx}", MetricCard).value = self._format_bytes(int(metrics.get('avg_msg_size', 0)))
-                self.query_one(f"#max-size-{idx}", MetricCard).value = self._format_bytes(int(metrics.get('max_msg_size', 0)))
+                w['peak_rate'].value = f"{metrics.get('peak_msg_rate_per_sec', 0):.1f}"
+                w['in_rate'].value = self._format_bytes(int(metrics.get('throughput_in', 0))) + "/s"
+                w['out_rate'].value = self._format_bytes(int(metrics.get('throughput_out', 0))) + "/s"
+                w['peak_in'].value = self._format_bytes(int(metrics.get('peak_throughput_in', 0))) + "/s"
+                w['avg_size'].value = self._format_bytes(int(metrics.get('avg_msg_size', 0)))
+                w['max_size'].value = self._format_bytes(int(metrics.get('max_msg_size', 0)))
 
                 errors = metrics.get('errors', {})
                 total_errors = sum(errors.values()) if errors else 0
-                error_card = self.query_one(f"#errors-{idx}", MetricCard)
+                error_card = w['errors']
                 error_card.value = str(total_errors)
-                if total_errors > 0:
-                     error_card.styles.background = "red"  # Alert on error
-                     error_card.styles.color = "white"
-                else:
-                     error_card.styles.background = None
-                     error_card.styles.color = None
-            except (LookupError, AttributeError):
+                error_card.set_class(total_errors > 0, "error-highlight")
+
+                disconnects = errors.get('source_disconnects', 0)
+                dc_card = w['disconnects']
+                dc_card.value = str(disconnects)
+                dc_card.set_class(disconnects > 0, "error-highlight")
+            except AttributeError:
                 pass
 
             # Update client list with addresses
             try:
-                client_list = self.query_one(f"#client-list-{idx}", ClientList)
                 ws_addrs = metrics.get('ws_client_addrs', [])
                 unix_addrs = metrics.get('unix_client_addrs', [])
-                client_list.update_clients(
+                w['client_list'].update_clients(
                     metrics['ws_clients'],
                     metrics['unix_clients'],
                     ws_addrs,
                     unix_addrs
                 )
-            except (LookupError, AttributeError):
-                pass
             except Exception:
-                # Silently ignore unexpected errors in metrics update
                 pass
 
     def _format_duration(self, seconds: float) -> str:
@@ -390,7 +419,7 @@ class VeylorTUI(App):
         """Format byte count in human-readable format"""
         if bytes_count < 1024:
             return f"{bytes_count} B"
-        elif bytes_count < 1024 * 1024:#3
+        elif bytes_count < 1024 * 1024:
             return f"{bytes_count / 1024:.2f} KB"
         elif bytes_count < 1024 * 1024 * 1024:
             return f"{bytes_count / (1024 * 1024):.2f} MB"
@@ -405,3 +434,6 @@ class VeylorTUI(App):
         """Called when app is unmounted."""
         if self.update_task:
             self.update_task.stop()
+            self.update_task = None
+        self._source_widgets.clear()
+        self.relay_instance = None

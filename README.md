@@ -299,5 +299,56 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Changelog
 
-- 1.0.0
-  - Iinitial release
+### 1.1.0
+- **Terminal UI (TUI)**: Added optional real-time monitoring dashboard using Textual framework
+  - Live metrics display with auto-refresh (500ms intervals)
+  - Connection status indicators (🟢 connected, 🔴 disconnected)
+  - Client address tracking and display (IP:port for WebSocket, identifiers for Unix sockets)
+  - Color-coded log viewer with full-width display
+  - Keyboard shortcuts (quit, dark/light mode toggle, clear logs)
+  - Non-blocking operation that doesn't impact WebSocket performance
+- **Bidirectional Communication**: Full 2-way message support
+  - Clients can send messages back to source WebSocket
+  - Supported for both WebSocket and Unix socket clients
+  - Added bidirectional example clients
+- **Per-Source Endpoint Configuration**: Independent endpoints for each source
+  - Each source can have its own WebSocket port
+  - Each source can have its own Unix socket path
+  - Improved isolation between sources
+- **Enhanced Metrics & Monitoring**:
+  - Messages sent/received counters
+  - Data transfer statistics (bytes in/out)
+  - Messages per minute calculation
+  - Average message interval tracking
+  - Source latency measurement with precision display
+  - Source disconnect tracking
+  - Client connection metrics (WebSocket and Unix socket counts)
+- **Performance Improvements**:
+  - Integrated uvloop for high-performance async event loop
+  - Optimized memory usage in message broadcasting
+  - Enhanced client list update performance
+  - Improved metrics handling to reduce memory overhead
+- **Source Disconnection Handling**:
+  - Automatically disconnect all downstream clients when upstream source disconnects
+  - Clean reconnection workflow with proper client notification
+- **Improved Error Handling**:
+  - Specific exception types for better error clarity
+  - Enhanced graceful shutdown with event-based coordination
+  - Better validation for endpoint configuration
+  - Empty source validation
+- **Code Quality & Maintainability**:
+  - Refactored TUI integration for better separation of concerns
+  - Standardized TUI styling with theme variables
+  - Removed unused imports and cleaned up code
+  - Improved logging handler management
+
+### 1.0.0
+- Initial release
+  - Non-blocking async WebSocket relay/reflector
+  - Multiple WebSocket source support
+  - Dual rebroadcast modes (WebSocket and Unix domain sockets)
+  - Automatic reconnection with exponential backoff
+  - Concurrent message broadcasting
+  - Graceful shutdown handling
+  - Configuration via YAML
+  - Systemd service integration
