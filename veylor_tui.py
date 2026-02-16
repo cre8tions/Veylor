@@ -26,7 +26,7 @@ class MetricCard(Static):
         self.value = value
 
     def render(self) -> str:
-        return f"[bold cyan]{self.label}[/]\n[yellow]{self.value}[/]"
+        return f"[bold]{self.label}[/]\n[bold]{self.value}[/]"
 
 
 class ConnectionStatus(Static):
@@ -193,7 +193,6 @@ class VeylorTUI(App):
 
     #metrics-container {
         height: auto;
-        /* max-height: 60vh; */
         overflow-y: auto;
         padding: 0 1;
     }
@@ -217,6 +216,8 @@ class VeylorTUI(App):
         margin-right: 1;
         height: 4;
         width: 1fr;
+        color: $text;
+        background: $surface;
     }
 
     ConnectionStatus {
@@ -225,22 +226,23 @@ class VeylorTUI(App):
         height: 5;
         width: 100%;
         margin-bottom: 1;
-        tint: white 15%;
+        color: $text;
+        background: $boost;
     }
 
     ClientList {
         border: solid $accent;
         padding: 1;
         height: auto;
-        /* max-height: 12; */
         margin-top: 1;
         overflow-y: auto;
+        color: $text;
         background: $surface-darken-1;
     }
 
     .error-highlight {
-        background: red;
-        color: white;
+        background: $error;
+        color: $text;
     }
 
     SourceMetricsPanel {
