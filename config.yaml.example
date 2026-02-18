@@ -16,7 +16,7 @@ sources:
   # Example with Unix socket only
   # - url: "wss://example.com/websocket2"
   #   unix_socket_path: "/tmp/veylor_source2.sock"
-  
+
   # Example with both endpoints
   # - url: "wss://example.com/websocket3"
   #   websocket_port: 8766

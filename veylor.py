@@ -63,7 +63,7 @@ class SourceRelay:
             'messages_to_source': 0,
             'bytes_from_source': 0,
             'bytes_to_source': 0,
-            'message_timestamps': deque(maxlen=100000),  # ~150 sec at 666 msg/sec (40k/min) for rate calculation
+            'message_timestamps': deque(maxlen=10000),
             'start_time': time.time(),
             'last_message_time': None,
             'source_connected_at': None,

@@ -26,7 +26,7 @@ class MetricCard(Static):
         self.value = value
 
     def render(self) -> str:
-        return f"[bold]{self.label}[/]\n[bold]{self.value}[/]"
+        return f"[bold ]{self.label}[/]\n[yellow]{self.value}[/]"
 
 
 class ConnectionStatus(Static):
@@ -227,7 +227,8 @@ class VeylorTUI(App):
         width: 100%;
         margin-bottom: 1;
         color: $text;
-        background: $boost;
+        background: $surface;
+        # tint: white 15%;
     }
 
     ClientList {
