@@ -85,8 +85,14 @@ python veylor.py -v
 # Run with Terminal UI (TUI) mode
 python veylor.py --tui
 
+# Run TUI mode with explicit log file path
+python veylor.py --tui --log-file /var/log/veylor.log
+
+# Debug mode: log each message received from source websocket(s)
+python veylor.py --debug-source-messages
+
 # Combine options
-python veylor.py -c /path/to/config.yaml --tui -v
+python veylor.py -c /path/to/config.yaml --tui -v --debug-source-messages
 ```
 
 ### Terminal UI (TUI) Mode
@@ -96,6 +102,9 @@ Veylor includes an optional Terminal User Interface for real-time monitoring:
 ```bash
 python veylor.py --tui
 ```
+
+When TUI mode is enabled, Veylor writes logs to a file (default: `veylor.log`) so terminal output does not interfere with the dashboard.
+Use `--log-file` to override the path.
 
 **Features:**
 - **Real-time metrics dashboard** updated every 500ms
@@ -234,7 +243,7 @@ Veylor uses a fully asynchronous architecture with per-source isolation and bidi
 ## Command Line Options
 
 ```
-usage: veylor.py [-h] [-c CONFIG] [-v] [--tui]
+usage: veylor.py [-h] [-c CONFIG] [-v] [--tui] [--log-file LOG_FILE] [--debug-source-messages]
 
 Veylor - High-performance WebSocket relay
 
@@ -244,6 +253,9 @@ optional arguments:
                         Path to configuration file (default: config.yaml)
   -v, --verbose         Enable verbose logging
   --tui                 Enable Terminal UI mode
+  --log-file LOG_FILE   Path to log file (used in --tui mode, optional in non-TUI mode)
+  --debug-source-messages
+                        Enable DEBUG mode and log every message received from source websocket(s)
 ```
 
 ## Signal Handling

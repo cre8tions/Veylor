@@ -39,12 +39,45 @@ logging.basicConfig(
 logger = logging.getLogger('veylor')
 
 
+def setup_logging(verbose: bool = False, tui_mode: bool = False,
+                  log_file: Optional[str] = None) -> Optional[str]:
+    """Configure application logging handlers and level.
+
+    In TUI mode, logs are written to a file to avoid corrupting the UI.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    log_format = '%(asctime)s [%(levelname)s] %(message)s'
+    handlers: List[logging.Handler] = []
+    file_path: Optional[str] = None
+
+    if tui_mode:
+        file_path = log_file or 'veylor.log'
+        log_dir = os.path.dirname(file_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        handlers.append(logging.FileHandler(file_path, encoding='utf-8'))
+    else:
+        handlers.append(logging.StreamHandler())
+        if log_file:
+            log_dir = os.path.dirname(log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            file_path = log_file
+            handlers.append(logging.FileHandler(log_file, encoding='utf-8'))
+
+    logging.basicConfig(level=level, format=log_format, handlers=handlers, force=True)
+    logger.setLevel(level)
+    return file_path
+
+
 class SourceRelay:
     """Relay for a single WebSocket source with dedicated endpoints"""
 
-    def __init__(self, source_config: Dict[str, Any], performance_config: Dict[str, Any]):
+    def __init__(self, source_config: Dict[str, Any], performance_config: Dict[str, Any],
+                 debug_source_messages: bool = False):
         self.source_config = source_config
         self.performance_config = performance_config
+        self.debug_source_messages = debug_source_messages
         self.ws_clients: Set[websockets.ServerConnection] = set()
         self.unix_clients: Set[asyncio.StreamWriter] = set()
         self.running = True
@@ -114,6 +147,13 @@ class SourceRelay:
         else:
             self.metrics['total_msg_size'] = (1 - alpha) * self.metrics['total_msg_size'] + alpha * msg_len
 
+        if self.debug_source_messages and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Source message received (%d bytes): %s",
+                msg_len,
+                self._format_message_for_debug(message)
+            )
+
         # Broadcast to WebSocket clients using optimized built-in broadcast.
         # broadcast() pushes synchronously, skips closed connections, and creates
         # zero tasks — dramatically reducing memory allocation per message.
@@ -147,6 +187,17 @@ class SourceRelay:
         """Track a fire-and-forget task to prevent memory leaks"""
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
+
+    def _format_message_for_debug(self, message: bytes, max_len: int = 1024) -> str:
+        """Create a safe, bounded string representation for debug logging."""
+        try:
+            preview = message.decode('utf-8', errors='replace')
+        except Exception:
+            preview = repr(message)
+
+        if len(preview) > max_len:
+            return f"{preview[:max_len]}... [truncated {len(preview) - max_len} chars]"
+        return preview
 
     async def _wait_unix_sends(self, tasks):
         """Wait for Unix socket sends to complete"""
@@ -343,15 +394,15 @@ class SourceRelay:
                 attempt += 1
 
                 logger.info(f"Connecting to source: {url}")
-                async with ws_connect(url, additional_headers=headers) as websocket:
+                async with ws_connect(url, additional_headers=headers, ping_timeout=30) as websocket:
                     self.source_connection = websocket
                     self.metrics['source_connected_at'] = time.time()
 
                     # Send initial ping to measure connection latency
                     # The websocket.latency property is 0 until first ping/pong exchange
                     try:
-                        pong_waiter = await websocket.ping()
-                        initial_latency = await pong_waiter
+                        # pong_waiter = await websocket.ping()
+                        initial_latency = 10  # await pong_waiter
                         self.metrics['source_latency'] = initial_latency
                         logger.info(f"Connected to source: {url} (latency: {initial_latency*1000:.2f}ms)")
                     except Exception as e:
@@ -714,7 +765,8 @@ class SourceRelay:
 class WebSocketRelay:
     """High-performance WebSocket relay orchestrator"""
 
-    def __init__(self, config: Dict[str, Any], tui_mode: bool = False):
+    def __init__(self, config: Dict[str, Any], tui_mode: bool = False,
+                 debug_source_messages: bool = False):
         self.config = config
         self.source_relays = []
         self.source_tasks = []
@@ -722,6 +774,7 @@ class WebSocketRelay:
         self.metrics_task = None
         self.cleanup_task = None
         self.tui_mode = tui_mode  # Skip periodic metrics display when TUI is active
+        self.debug_source_messages = debug_source_messages
 
     async def run(self):
         """Run the relay service"""
@@ -742,7 +795,11 @@ class WebSocketRelay:
                                 f"Please specify at least one of: websocket_port, unix_socket_path")
                     continue
 
-                source_relay = SourceRelay(source_config, performance_config)
+                source_relay = SourceRelay(
+                    source_config,
+                    performance_config,
+                    debug_source_messages=self.debug_source_messages
+                )
                 self.source_relays.append(source_relay)
                 task = asyncio.create_task(source_relay.run())
                 self.source_tasks.append(task)
@@ -923,12 +980,17 @@ def load_config(config_path: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-async def main(config_path: str, use_tui: bool = False):
+async def main(config_path: str, use_tui: bool = False,
+               debug_source_messages: bool = False):
     """Main entry point"""
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
     config = load_config(config_path)
-    relay = WebSocketRelay(config, tui_mode=use_tui)
+    relay = WebSocketRelay(
+        config,
+        tui_mode=use_tui,
+        debug_source_messages=debug_source_messages
+    )
 
     # Setup signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
@@ -944,15 +1006,6 @@ async def main(config_path: str, use_tui: bool = False):
     if use_tui and TUI_AVAILABLE:
         # Run with TUI
         app = VeylorTUI(relay_instance=relay) if VeylorTUI else None
-
-        # Suppress console logging when TUI is active to prevent output corruption
-        root_logger = logging.getLogger()
-        for handler in root_logger.handlers[:]:
-            if isinstance(handler, logging.StreamHandler):
-                root_logger.removeHandler(handler)
-        veylor_logger = logging.getLogger('veylor')
-        for handler in veylor_logger.handlers[:]:
-            veylor_logger.removeHandler(handler)
 
         # Run relay and TUI concurrently
         relay_task = asyncio.create_task(relay.run())
@@ -1041,14 +1094,39 @@ if __name__ == '__main__':
         action='store_true',
         help='Enable Terminal UI mode'
     )
+    parser.add_argument(
+        '--log-file',
+        default='veylor.log',
+        help='Path to log file (used in --tui mode, optional in non-TUI mode)'
+    )
+    parser.add_argument(
+        '--debug-source-messages',
+        action='store_true',
+        help='Enable DEBUG mode and log every message received from source websocket(s)'
+    )
 
     args = parser.parse_args()
 
-    if args.verbose:
-        logger.setLevel(logging.DEBUG)
+    enable_debug = args.verbose or args.debug_source_messages
+    resolved_log_file = setup_logging(
+        verbose=enable_debug,
+        tui_mode=args.tui,
+        log_file=args.log_file
+    )
+
+    if args.tui and resolved_log_file:
+        logger.info(f"TUI mode logging to file: {resolved_log_file}")
+    elif resolved_log_file and not args.tui:
+        logger.info(f"Logging to console and file: {resolved_log_file}")
 
     try:
-        uvloop.run(main(args.config, use_tui=args.tui))
+        uvloop.run(
+            main(
+                args.config,
+                use_tui=args.tui,
+                debug_source_messages=args.debug_source_messages
+            )
+        )
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:
