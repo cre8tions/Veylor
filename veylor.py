@@ -394,7 +394,7 @@ class SourceRelay:
                 attempt += 1
 
                 logger.info(f"Connecting to source: {url}")
-                async with ws_connect(url, additional_headers=headers) as websocket:
+                async with ws_connect(url, additional_headers=headers, ping_timeout=30) as websocket:
                     self.source_connection = websocket
                     self.metrics['source_connected_at'] = time.time()
 
